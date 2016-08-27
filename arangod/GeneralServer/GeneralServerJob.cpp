@@ -44,10 +44,12 @@ using namespace arangodb::rest;
 
 GeneralServerJob::GeneralServerJob(GeneralServer* server,
                                    WorkItem::uptr<RestHandler> handler,
+                                   Task2* task,
                                    bool isAsync)
     : Job("GeneralServerJob"),
       _server(server),
       _workDesc(nullptr),
+      _task(task),
       _isAsync(isAsync) {
   _handler = std::move(handler);
 }
@@ -91,10 +93,12 @@ void GeneralServerJob::work() {
       data->_loop = _handler->eventLoop();
       data->_type = TaskData::TASK_DATA_RESPONSE;
       data->_response = _handler->stealResponse();
+      data->_task = _task;
 
+      LOG(ERR) << "DONE";
       _handler->RequestStatisticsAgent::transferTo(data.get());
 
-      SchedulerFeature::SCHEDULER->signalTask(data);
+      SchedulerFeature::SCHEDULER->signalTask2(std::move(data));
     }
 
     LOG(TRACE) << "finished job " << (void*)this;

@@ -193,7 +193,7 @@ add_executable(${BIN_ARANGOD}
   GeneralServer/GeneralServerFeature.cpp
   GeneralServer/HttpCommTask.cpp
   GeneralServer/GeneralServerJob.cpp
-  GeneralServer/HttpsCommTask.cpp
+  # GeneralServer/HttpsCommTask.cpp
   GeneralServer/PathHandler.cpp
   GeneralServer/RestHandler.cpp
   GeneralServer/RestHandlerFactory.cpp
@@ -269,7 +269,9 @@ add_executable(${BIN_ARANGOD}
   Scheduler/SchedulerThread.cpp
   Scheduler/SignalTask.cpp
   Scheduler/SocketTask.cpp
+  Scheduler/SocketTask2.cpp
   Scheduler/Task.cpp
+  Scheduler/Task2.cpp
   Scheduler/TaskManager.cpp
   Scheduler/TimerTask.cpp
   Statistics/StatisticsFeature.cpp
@@ -352,6 +354,7 @@ target_link_libraries(${BIN_ARANGOD}
   ${LIB_ARANGO_V8}
   ${LIB_ARANGO}
   ${LIBEV_LIBS}
+  ${BOOST_LIBS}
   ${LINENOISE_LIBS}
   ${MSVC_LIBS}
   ${V8_LIBS}

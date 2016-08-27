@@ -157,10 +157,11 @@ std::unique_ptr<basics::StringBuffer> createChunkForNetworkSingle(
 // }
 }
 
-VppCommTask::VppCommTask(GeneralServer* server, TRI_socket_t sock,
-                         ConnectionInfo&& info, double timeout)
-    : Task("VppCommTask"),
-      GeneralCommTask(server, sock, std::move(info), timeout) {
+VppCommTask::VppCommTask(EventLoop2 loop, GeneralServer* server,
+                         TRI_socket_t sock, ConnectionInfo&& info,
+                         double timeout)
+    : Task2(loop, "VppCommTask"),
+      GeneralCommTask(loop, server, sock, std::move(info), timeout) {
   _protocol = "vpp";
   _readBuffer->reserve(
       _bufferLength);  // ATTENTION <- this is required so we do not
@@ -456,7 +457,7 @@ void VppCommTask::closeTask(rest::ResponseCode code) {
     handleSimpleError(code, message.first);
   }
   _incompleteMessages.clear();
-  _clientClosed = true;
+  closeStream();
 }
 
 rest::ResponseCode VppCommTask::authenticateRequest(GeneralRequest* request) {
@@ -502,6 +503,6 @@ void VppCommTask::handleSimpleError(rest::ResponseCode responseCode,
     response.setPayload(builder.slice(), true, VPackOptions::Defaults);
     processResponse(&response);
   } catch (...) {
-    _clientClosed = true;
+    closeStream();
   }
 }

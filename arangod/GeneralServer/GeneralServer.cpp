@@ -127,7 +127,7 @@ bool GeneralServer::handleRequestAsync(GeneralCommTask* task,
 
   // execute the handler using the dispatcher
   std::unique_ptr<Job> job =
-      std::make_unique<GeneralServerJob>(this, std::move(handler), true);
+    std::make_unique<GeneralServerJob>(this, std::move(handler), task, true);
   task->RequestStatisticsAgent::transferTo(job.get());
 
   // register the job with the job manager
@@ -172,7 +172,7 @@ bool GeneralServer::handleRequest(GeneralCommTask* task,
 
   // use a dispatcher queue, handler belongs to the job
   std::unique_ptr<Job> job =
-      std::make_unique<GeneralServerJob>(this, std::move(handler));
+    std::make_unique<GeneralServerJob>(this, std::move(handler), task);
   task->RequestStatisticsAgent::transferTo(job.get());
 
   LOG(TRACE) << "GeneralCommTask " << (void*)task

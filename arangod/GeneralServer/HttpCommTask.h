@@ -13,7 +13,7 @@ class HttpCommTask : public GeneralCommTask {
   static size_t const RunCompactEvery;
 
  public:
-  HttpCommTask(GeneralServer*, TRI_socket_t, ConnectionInfo&&, double timeout);
+  HttpCommTask(EventLoop2, GeneralServer*, TRI_socket_t, ConnectionInfo&&, double timeout);
 
   // convert from GeneralResponse to httpResponse ad dispatch request to class
   // internal addResponse

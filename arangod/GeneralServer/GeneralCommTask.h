@@ -25,7 +25,7 @@
 #ifndef ARANGOD_GENERAL_SERVER_GENERAL_COMM_TASK_H
 #define ARANGOD_GENERAL_SERVER_GENERAL_COMM_TASK_H 1
 
-#include "Scheduler/SocketTask.h"
+#include "Scheduler/SocketTask2.h"
 
 #include <openssl/ssl.h>
 
@@ -124,12 +124,12 @@ class GeneralServer;
 // handleRead (virtual function required by SocketTask) that calls processRead
 // (which has to be implemented in derived) as long as new input is available.
 
-class GeneralCommTask : public SocketTask, public RequestStatisticsAgent {
+class GeneralCommTask : public SocketTask2, public RequestStatisticsAgent {
   GeneralCommTask(GeneralCommTask const&) = delete;
   GeneralCommTask const& operator=(GeneralCommTask const&) = delete;
 
  public:
-  GeneralCommTask(GeneralServer*, TRI_socket_t, ConnectionInfo&&,
+  GeneralCommTask(EventLoop2, GeneralServer*, TRI_socket_t, ConnectionInfo&&,
                   double keepAliveTimeout);
 
   virtual void addResponse(GeneralResponse*) = 0;
@@ -154,8 +154,8 @@ class GeneralCommTask : public SocketTask, public RequestStatisticsAgent {
                                  uint64_t messageId) = 0;
 
  private:
-  void handleTimeout() override final { _clientClosed = true; }
-  void signalTask(TaskData*) override;
+  void handleTimeout() /* override final */ { /* _clientClosed = true; */ }
+  void signalTask(std::unique_ptr<TaskData>) override;
 
  protected:
   // for asynchronous requests

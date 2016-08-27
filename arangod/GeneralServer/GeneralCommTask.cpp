@@ -42,17 +42,17 @@ using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-GeneralCommTask::GeneralCommTask(GeneralServer* server, TRI_socket_t socket,
-                                 ConnectionInfo&& info, double keepAliveTimeout)
-    : Task("GeneralCommTask"),
-      SocketTask(socket, std::move(info), keepAliveTimeout),
+GeneralCommTask::GeneralCommTask(EventLoop2 loop, GeneralServer* server,
+                                 TRI_socket_t socket, ConnectionInfo&& info,
+                                 double keepAliveTimeout)
+    : Task2(loop, "GeneralCommTask"),
+      SocketTask2(loop, socket, keepAliveTimeout),
       _server(server) {}
 
-void GeneralCommTask::signalTask(TaskData* data) {
+void GeneralCommTask::signalTask(std::unique_ptr<TaskData> data) {
   // data response
   if (data->_type == TaskData::TASK_DATA_RESPONSE) {
     data->RequestStatisticsAgent::transferTo(this);
-
     processResponse(data->_response.get());
   }
 
@@ -63,7 +63,7 @@ void GeneralCommTask::signalTask(TaskData* data) {
 
   // do not know, what to do - give up
   else {
-    _clientClosed = true;
+    closeStream();
   }
 }
 
@@ -89,7 +89,8 @@ void GeneralCommTask::executeRequest(
     return;
   }
 
-  handler->setTaskId(_taskId, _loop);
+  EventLoop loop;
+  handler->setTaskId(_taskId, loop);
 
   // asynchronous request
   bool ok = false;
@@ -134,7 +135,7 @@ void GeneralCommTask::processResponse(GeneralResponse* response) {
   if (response == nullptr) {
     LOG_TOPIC(WARN, Logger::COMMUNICATION)
         << "processResponse received a nullptr, closing connection";
-    _clientClosed = true;
+    closeStream();
   } else {
     addResponse(response);
   }

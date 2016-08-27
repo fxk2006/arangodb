@@ -28,18 +28,33 @@
 
 #include "Scheduler.h"
 
+#include <velocypack/Builder.h>
+#include <velocypack/velocypack-aliases.h>
+
+#include <thread>
+
 #include "Basics/MutexLocker.h"
 #include "Basics/StringUtils.h"
 #include "Basics/Thread.h"
 #include "Logger/Logger.h"
 #include "Scheduler/SchedulerThread.h"
 #include "Scheduler/Task.h"
-
-#include <velocypack/Builder.h>
-#include <velocypack/velocypack-aliases.h>
+#include "Scheduler/Task2.h"
 
 using namespace arangodb::basics;
 using namespace arangodb::rest;
+
+boost::asio::io_service* IOSERVICE;
+EventLoop2* EVENTLOOP2;
+
+static void runThread(boost::asio::io_service* service) {
+  boost::shared_ptr<boost::asio::io_service::work> work(
+      new boost::asio::io_service::work(*service));
+
+  LOG(ERR) << "running";
+  service->run();
+  LOG(ERR) << "stopped";
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief scheduler singleton
@@ -117,6 +132,13 @@ bool Scheduler::start(ConditionVariable* cv) {
         LOG(TRACE) << "waiting for thread #" << i << " to start";
       }
     }
+  }
+
+  IOSERVICE = new boost::asio::io_service();
+  EVENTLOOP2 = new EventLoop2{._ioService = *IOSERVICE};
+
+  for (size_t i = 0; i < nrThreads; ++i) {
+    new std::thread(std::bind(runThread, IOSERVICE));
   }
 
   LOG(TRACE) << "all scheduler threads are up and running";
@@ -511,6 +533,14 @@ int Scheduler::registerTask(Task* task, ssize_t* got, ssize_t want) {
   }
 
   return TRI_ERROR_NO_ERROR;
+}
+
+void Scheduler::signalTask2(std::unique_ptr<TaskData> data) {
+  TaskData* td = data.release();
+  IOSERVICE->dispatch([td]() {
+    std::unique_ptr<TaskData> data(td);
+    data->_task->signalTask(std::move(data));
+  });
 }
 
 ////////////////////////////////////////////////////////////////////////////////

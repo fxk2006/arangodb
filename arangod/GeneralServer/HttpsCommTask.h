@@ -50,10 +50,10 @@ class HttpsCommTask : public HttpCommTask {
   ~HttpsCommTask();
 
  protected:
-  bool setup(Scheduler*, EventLoop) override;
-  bool handleEvent(EventToken, EventType) override;
-  bool fillReadBuffer() override;
-  bool handleWrite() override;
+  bool setup(Scheduler*, EventLoop) /* override */ ;
+  bool handleEvent(EventToken, EventType) /* override */ ;
+  bool fillReadBuffer() /* override */;
+  bool handleWrite() /* override */;
 
  private:
   bool trySSLAccept();

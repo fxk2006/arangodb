@@ -22,46 +22,51 @@
 /// @author Achim Brandt
 ////////////////////////////////////////////////////////////////////////////////
 
-#ifndef ARANGOD_HTTP_SERVER_HTTP_SERVER_JOB_H
-#define ARANGOD_HTTP_SERVER_HTTP_SERVER_JOB_H 1
+#ifndef ARANGOD_SCHEDULER_TASK2_H
+#define ARANGOD_SCHEDULER_TASK2_H 1
 
-#include "Dispatcher/Job.h"
+#include "Basics/Common.h"
 
-#include "Basics/Exceptions.h"
-#include "Basics/WorkMonitor.h"
+#include "Scheduler/Task.h"
+#include "Scheduler/events.h"
 
 namespace arangodb {
+namespace velocypack {
+class Builder;
+}
+
 namespace rest {
-class RestHandler;
-class GeneralServer;
-class Task2;
-
-class GeneralServerJob : public Job {
-  GeneralServerJob(GeneralServerJob const&) = delete;
-  GeneralServerJob& operator=(GeneralServerJob const&) = delete;
+class Task2 {
+  Task2(Task2 const&) = delete;
+  Task2& operator=(Task2 const&) = delete;
 
  public:
-  GeneralServerJob(GeneralServer*, arangodb::WorkItem::uptr<RestHandler>,
-                   Task2*, bool isAsync = false);
-
-  ~GeneralServerJob();
+  Task2(EventLoop2, std::string const& name);
+  virtual ~Task2() {}
 
  public:
-  RestHandler* handler() const { return _handler.get(); }
+  // returns the internal task identifier
+  uint64_t taskId() const { return _taskId; }
+
+  // returns the task name for debugging
+  std::string const& name() const { return _name; }
+
+  // returns the internal event loop
+  EventLoop2 eventLoop() const { return _loop; }
+
+  // get a VelocyPack representation of the task for reporting
+  std::shared_ptr<arangodb::velocypack::Builder> toVelocyPack() const;
+  void toVelocyPack(arangodb::velocypack::Builder&) const;
 
  public:
-  size_t queue() const override;
-  void work() override;
-  bool cancel() override;
-  void cleanup(DispatcherQueue*) override;
-  void handleError(basics::Exception const&) override;
+  virtual void signalTask(std::unique_ptr<TaskData>) = 0;
 
  protected:
-  GeneralServer* _server;
-  arangodb::WorkItem::uptr<RestHandler> _handler;
-  arangodb::WorkDescription* _workDesc;
-  Task2* _task;
-  bool _isAsync;
+  EventLoop2 _loop;
+  uint64_t const _taskId;
+
+ private:
+  std::string const _name;
 };
 }
 }

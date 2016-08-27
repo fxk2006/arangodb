@@ -38,7 +38,8 @@ namespace rest {
 
 class VppCommTask : public GeneralCommTask {
  public:
-  VppCommTask(GeneralServer*, TRI_socket_t, ConnectionInfo&&, double timeout);
+  VppCommTask(EventLoop2, GeneralServer*, TRI_socket_t, ConnectionInfo&&,
+              double timeout);
 
   // convert from GeneralResponse to vppResponse ad dispatch request to class
   // internal addResponse
@@ -64,8 +65,7 @@ class VppCommTask : public GeneralCommTask {
   std::unique_ptr<GeneralResponse> createResponse(
       rest::ResponseCode, uint64_t messageId) override final;
 
-  void handleSimpleError(rest::ResponseCode code,
-                         uint64_t id) override {
+  void handleSimpleError(rest::ResponseCode code, uint64_t id) override {
     VppResponse response(code, id);
     addResponse(&response);
   }
@@ -76,8 +76,7 @@ class VppCommTask : public GeneralCommTask {
  private:
   // reets the internal state this method can be called to clean up when the
   // request handling aborts prematurely
-  void closeTask(rest::ResponseCode code =
-                     rest::ResponseCode::SERVER_ERROR);
+  void closeTask(rest::ResponseCode code = rest::ResponseCode::SERVER_ERROR);
 
   void addResponse(VppResponse*);
   rest::ResponseCode authenticateRequest(GeneralRequest* request);

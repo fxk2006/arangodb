@@ -58,32 +58,37 @@ GeneralListenTask::GeneralListenTask(GeneralServer* server, Endpoint* endpoint,
   _verificationCallback = GeneralServerFeature::verificationCallback();
 }
 
+extern EventLoop2* EVENTLOOP2;
+
 bool GeneralListenTask::handleConnected(TRI_socket_t socket,
                                         ConnectionInfo&& info) {
   GeneralCommTask* commTask = nullptr;
 
   switch (_connectionType) {
     case ProtocolType::VPPS:
-      commTask =
-          new VppCommTask(_server, socket, std::move(info), _keepAliveTimeout);
+      commTask = new VppCommTask(*EVENTLOOP2, _server, socket, std::move(info),
+                                 _keepAliveTimeout);
       break;
     case ProtocolType::VPP:
-      commTask =
-          new VppCommTask(_server, socket, std::move(info), _keepAliveTimeout);
+      commTask = new VppCommTask(*EVENTLOOP2, _server, socket, std::move(info),
+                                 _keepAliveTimeout);
       break;
     case ProtocolType::HTTPS:
+      /*
       commTask = new HttpsCommTask(_server, socket, std::move(info),
                                    _keepAliveTimeout, _sslContext,
                                    _verificationMode, _verificationCallback);
+      */
       break;
     case ProtocolType::HTTP:
-      commTask =
-          new HttpCommTask(_server, socket, std::move(info), _keepAliveTimeout);
+      commTask = new HttpCommTask(*EVENTLOOP2, _server, socket, std::move(info),
+                                  _keepAliveTimeout);
       break;
     default:
       return false;
   }
 
-  SchedulerFeature::SCHEDULER->registerTask(commTask);
+  commTask->start();
+
   return true;
 }

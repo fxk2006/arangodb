@@ -287,6 +287,8 @@ class Scheduler : private TaskManager {
 
   virtual void signalTask(std::unique_ptr<TaskData>&) = 0;
 
+  void signalTask2(std::unique_ptr<TaskData>);
+
  private:
   //////////////////////////////////////////////////////////////////////////////
   /// @brief registers a new task
