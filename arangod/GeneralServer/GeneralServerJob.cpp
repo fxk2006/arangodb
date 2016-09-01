@@ -95,10 +95,10 @@ void GeneralServerJob::work() {
       data->_response = _handler->stealResponse();
       data->_task = _task;
 
-      LOG(ERR) << "DONE";
       _handler->RequestStatisticsAgent::transferTo(data.get());
 
-      SchedulerFeature::SCHEDULER->signalTask2(std::move(data));
+      //      SchedulerFeature::SCHEDULER->signalTask2(std::move(data));
+      _task->signalTask(std::move(data));
     }
 
     LOG(TRACE) << "finished job " << (void*)this;

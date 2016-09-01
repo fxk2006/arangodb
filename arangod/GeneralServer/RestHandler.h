@@ -48,7 +48,7 @@ class RestHandler : public RequestStatisticsAgent, public arangodb::WorkItem {
  public:
   RestHandler(GeneralRequest*, GeneralResponse*);
 
- protected:
+ public:
   ~RestHandler() = default;
 
  public:

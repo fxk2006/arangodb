@@ -34,6 +34,48 @@
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
+void disableNagle(int sock) {
+  int x = 1;
+
+  #ifdef SOL_TCP
+  int level = SOL_TCP;
+  #else
+  int level = SOL_SOCKET;
+  #endif
+
+  if (setsockopt(sock, level, TCP_NODELAY, (char*)&x, sizeof(x)))
+    LOG(ERR) << "disableNagle failed: ";
+
+  #ifdef SO_KEEPALIVE
+  if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&x, sizeof(x)))
+    LOG(ERR) << "SO_KEEPALIVE failed: ";
+
+  #ifdef __linux__
+  socklen_t len = sizeof(x);
+  if (getsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, &len))
+    LOG(ERR) << "can't get TCP_KEEPIDLE: ";
+
+  if (x > 300) {
+    x = 300;
+    if (setsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, sizeof(x))) {
+      LOG(ERR) << "can't set TCP_KEEPIDLE: ";
+    }
+  }
+
+  len = sizeof(x);  // just in case it changed
+  if (getsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, &len))
+    LOG(ERR) << "can't get TCP_KEEPINTVL: ";
+
+  if (x > 300) {
+    x = 300;
+    if (setsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, sizeof(x))) {
+      LOG(ERR) << "can't set TCP_KEEPINTVL: ";
+    }
+  }
+  #endif
+  #endif
+}
+
 SocketTask2::SocketTask2(EventLoop2 loop, TRI_socket_t socket,
                          double keepAliveTimeout)
     : Task2(loop, "SocketTask2"), _stream(loop._ioService) {
@@ -42,9 +84,13 @@ SocketTask2::SocketTask2(EventLoop2 loop, TRI_socket_t socket,
   ConnectionStatisticsAgent::acquire();
   connectionStatisticsAgentSetStart();
 
+  disableNagle(socket.fileDescriptor);
+
   boost::system::error_code ec;
   _stream.assign(boost::asio::ip::tcp::v4(), socket.fileDescriptor, ec);
 
+  _stream.non_blocking(false);
+  
   if (ec) {
     LOG_TOPIC(ERR, Logger::COMMUNICATION) << "cannot create stream from socket"
                                           << ec;
@@ -73,11 +119,62 @@ void SocketTask2::start() {
 }
 
 void SocketTask2::asyncReadSome() {
-  // reserve some memory for reading
-  if (_readBuffer->reserve(READ_BLOCK_SIZE + 1) == TRI_ERROR_OUT_OF_MEMORY) {
-    LOG(WARN) << "out of memory while reading from client";
-    closeStream();
-    return;
+  while (true) {
+    // reserve some memory for reading
+    if (_readBuffer->reserve(READ_BLOCK_SIZE + 1) == TRI_ERROR_OUT_OF_MEMORY) {
+      LOG(WARN) << "out of memory while reading from client";
+      closeStream();
+      return;
+    }
+
+    try {
+      LOG_TOPIC(INFO, Logger::REQUESTS)
+	<< "vor_read_some;"
+	<< uint64_t(TRI_microtime() * 1000000) << ";"
+	<< Thread::currentThreadId() << ";";
+      auto xxx = boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE);
+      LOG_TOPIC(INFO, Logger::REQUESTS)
+	<< "direkt_vor_read_some;"
+	<< uint64_t(TRI_microtime() * 1000000) << ";"
+	<< Thread::currentThreadId() << ";";
+      size_t bytesRead = _stream.read_some(xxx);
+      LOG_TOPIC(INFO, Logger::REQUESTS)
+	<< "nach_read_some;"
+	<< uint64_t(TRI_microtime() * 1000000) << ";"
+	<< Thread::currentThreadId() << ";"
+        << bytesRead << ";";
+
+      //LOG(ERR) << "INPUT: " << StringUtils::escapeC(std::string(_readBuffer->end(), bytesRead))
+      // << " " << bytesRead << " " << _readBuffer->end();
+
+      if (0 < bytesRead) {
+	_readBuffer->increaseLength(bytesRead);
+
+	while (processRead()) {
+	  if (_closeRequested) {
+	    break;
+	  }
+	}
+  
+	if (_closeRequested) {
+	  LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+	    << "close requested, closing receive stream";
+
+	  closeReceiveStream();
+	  return;
+	} else {
+	  continue;
+	}
+      }
+    } catch (boost::system::system_error err) {
+      if (err.code() != boost::asio::error::would_block) {
+	LOG(ERR) << "CLOSED NO WOULD BLOCK " << err.what();
+	closeStream();
+	return;
+      }
+    }
+
+    break;
   }
 
   // try to read more bytes
@@ -114,9 +211,9 @@ void SocketTask2::closeStream() {
   if (!_closedSend) {
     try {
       _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
-    } catch (boost::system::system_error ec) {
+    } catch (boost::system::system_error err) {
       LOG(WARN) << "shutdown send stream " << _stream.native_handle()
-                << " failed with " << ec.what();
+                << " failed with " << err.what();
     }
 
     _closedSend = true;
@@ -125,9 +222,9 @@ void SocketTask2::closeStream() {
   if (!_closedReceive) {
     try {
       _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
-    } catch (boost::system::system_error ec) {
+    } catch (boost::system::system_error err) {
       LOG(WARN) << "shutdown send stream " << _stream.native_handle()
-                << " failed with " << ec.what();
+                << " failed with " << err.what();
     }
 
     _closedReceive = true;
@@ -135,9 +232,9 @@ void SocketTask2::closeStream() {
 
   try {
     _stream.close();
-  } catch (boost::system::system_error ec) {
+  } catch (boost::system::system_error err) {
     LOG(WARN) << "close stream " << _stream.native_handle() << " failed with "
-              << ec.what();
+              << err.what();
   }
 
   _closeRequested = false;
@@ -147,9 +244,9 @@ void SocketTask2::closeReceiveStream() {
   if (!_closedReceive) {
     try {
       _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
-    } catch (boost::system::system_error ec) {
+    } catch (boost::system::system_error err) {
       LOG(WARN) << "shutdown receive stream " << _stream.native_handle()
-                << " failed with " << ec.what();
+                << " failed with " << err.what();
     }
 
     _closedReceive = true;
@@ -164,8 +261,16 @@ void SocketTask2::addWriteBuffer(std::unique_ptr<basics::StringBuffer> buffer,
   addWriteBuffer(buffer.release(), stat);
 }
 
+#include <iostream>
+
 void SocketTask2::addWriteBuffer(basics::StringBuffer* buffer,
                                  TRI_request_statistics_t* stat) {
+  LOG_TOPIC(INFO, Logger::REQUESTS)
+    << "stop;"
+    << uint64_t(TRI_microtime() * 1000000) << ";"
+    << (void*) this << ";"
+    << Thread::currentThreadId() << ";";
+
   if (_closedSend) {
     LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
         << "dropping output, send stream already closed";
@@ -189,9 +294,40 @@ void SocketTask2::addWriteBuffer(basics::StringBuffer* buffer,
   _writeBufferStatistics = stat;
 
   if (_writeBuffer != nullptr) {
+    boost::system::error_code ec;
+    size_t total = _writeBuffer->length();
+    size_t written = 0;
+
+    // LOG(ERR) << "OUTPUT: " << StringUtils::escapeC(std::string(_writeBuffer->begin(), _writeBuffer->length())) << " " << _writeBuffer->length();
+
+    try {
+      written = _stream.write_some(boost::asio::buffer(_writeBuffer->begin(), _writeBuffer->length()));
+
+      if (written == total) {
+	LOG_TOPIC(INFO, Logger::REQUESTS)
+	  << "stop2;"
+	  << uint64_t(TRI_microtime() * 1000000) << ";"
+	  << (void*) this << ";"
+	  << Thread::currentThreadId() << ";";
+
+	completedWriteBuffer();
+	return;
+      }
+    } catch (boost::system::system_error err) {
+      if (err.code() != boost::asio::error::would_block) {
+	LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "write on stream "
+						<< _stream.native_handle()
+						<< " failed with " << err.what();
+	closeStream();
+	return;
+      }
+    }
+
+    LOG(ERR) << "NO DIRECT";
+
     boost::asio::async_write(
         _stream,
-        boost::asio::buffer(_writeBuffer->begin(), _writeBuffer->length()),
+        boost::asio::buffer(_writeBuffer->begin() + written, total - written),
         [this](const boost::system::error_code& ec, std::size_t transferred) {
           if (ec) {
             LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "write on stream "

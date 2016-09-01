@@ -70,6 +70,13 @@ void GeneralCommTask::signalTask(std::unique_ptr<TaskData> data) {
 void GeneralCommTask::executeRequest(
     std::unique_ptr<GeneralRequest>&& request,
     std::unique_ptr<GeneralResponse>&& response) {
+  LOG_TOPIC(INFO, Logger::REQUESTS)
+    << "start;"
+    << uint64_t(TRI_microtime() * 1000000) << ";"
+    << request->requestPath() << ";"
+    << (void*) (Task*) this << ";"
+    << Thread::currentThreadId() << ";";
+
   // check for an async request (before the handler steals the request)
   bool found = false;
   std::string const& asyncExecution =
