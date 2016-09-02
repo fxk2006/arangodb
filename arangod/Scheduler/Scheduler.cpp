@@ -134,8 +134,8 @@ bool Scheduler::start(ConditionVariable* cv) {
     }
   }
 
-  IOSERVICE = new boost::asio::io_service();
-  EVENTLOOP2 = new EventLoop2{._ioService = *IOSERVICE};
+  IOSERVICE = _ioService = new boost::asio::io_service();
+  EVENTLOOP2 = new EventLoop2{._ioService = *IOSERVICE, ._scheduler = this};
 
   for (size_t i = 0; i < nrThreads; ++i) {
     new std::thread(std::bind(runThread, IOSERVICE));

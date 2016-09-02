@@ -67,6 +67,7 @@
 #include "RestServer/EndpointFeature.h"
 #include "RestServer/QueryRegistryFeature.h"
 #include "RestServer/ServerFeature.h"
+#include "Scheduler/Scheduler.h"
 #include "Scheduler/SchedulerFeature.h"
 #include "Ssl/SslServerFeature.h"
 #include "V8Server/V8DealerFeature.h"
@@ -354,7 +355,7 @@ void GeneralServerFeature::buildServers() {
     }
   }
 
-  GeneralServer* server = new GeneralServer();
+  GeneralServer* server = new GeneralServer(SchedulerFeature::SCHEDULER->ioService());
 
   server->setEndpointList(&endpointList);
   _servers.push_back(server);

@@ -35,12 +35,17 @@
 #include "Logger/Logger.h"
 #include "Meta/conversion.h"
 #include "Rest/VppResponse.h"
+#include "Scheduler/JobGuard.h"
 #include "Scheduler/Scheduler.h"
 #include "Scheduler/SchedulerFeature.h"
 
 using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                      constructors and destructors
+// -----------------------------------------------------------------------------
 
 GeneralCommTask::GeneralCommTask(EventLoop2 loop, GeneralServer* server,
                                  TRI_socket_t socket, ConnectionInfo&& info,
@@ -49,34 +54,13 @@ GeneralCommTask::GeneralCommTask(EventLoop2 loop, GeneralServer* server,
       SocketTask2(loop, socket, keepAliveTimeout),
       _server(server) {}
 
-void GeneralCommTask::signalTask(std::unique_ptr<TaskData> data) {
-  // data response
-  if (data->_type == TaskData::TASK_DATA_RESPONSE) {
-    data->RequestStatisticsAgent::transferTo(this);
-    processResponse(data->_response.get());
-  }
-
-  // data chunk
-  else if (data->_type == TaskData::TASK_DATA_CHUNK) {
-    handleChunk(data->_data.c_str(), data->_data.size());
-  }
-
-  // do not know, what to do - give up
-  else {
-    closeStream();
-  }
-}
+// -----------------------------------------------------------------------------
+// --SECTION--                                                 protected methods
+// -----------------------------------------------------------------------------
 
 void GeneralCommTask::executeRequest(
     std::unique_ptr<GeneralRequest>&& request,
     std::unique_ptr<GeneralResponse>&& response) {
-  LOG_TOPIC(INFO, Logger::REQUESTS)
-    << "start;"
-    << uint64_t(TRI_microtime() * 1000000) << ";"
-    << request->requestPath() << ";"
-    << (void*) (Task*) this << ";"
-    << Thread::currentThreadId() << ";";
-
   // check for an async request (before the handler steals the request)
   bool found = false;
   std::string const& asyncExecution =
@@ -108,10 +92,10 @@ void GeneralCommTask::executeRequest(
 
     if (asyncExecution == "store") {
       // persist the responses
-      ok = _server->handleRequestAsync(this, std::move(handler), &jobId);
+      ok = handleRequestAsync(std::move(handler), &jobId);
     } else {
       // don't persist the responses
-      ok = _server->handleRequestAsync(this, std::move(handler));
+      ok = handleRequestAsync(std::move(handler));
     }
 
     if (ok) {
@@ -130,7 +114,7 @@ void GeneralCommTask::executeRequest(
 
   // synchronous request
   else {
-    ok = _server->handleRequest(this, std::move(handler));
+    ok = handleRequest(std::move(handler));
   }
 
   if (!ok) {
@@ -147,3 +131,122 @@ void GeneralCommTask::processResponse(GeneralResponse* response) {
     addResponse(response);
   }
 }
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                   private methods
+// -----------------------------------------------------------------------------
+
+void GeneralCommTask::signalTask(std::unique_ptr<TaskData> data) {
+  // data response
+  if (data->_type == TaskData::TASK_DATA_RESPONSE) {
+    data->RequestStatisticsAgent::transferTo(this);
+    processResponse(data->_response.get());
+  }
+
+  // data chunk
+  else if (data->_type == TaskData::TASK_DATA_CHUNK) {
+    handleChunk(data->_data.c_str(), data->_data.size());
+  }
+
+  // do not know, what to do - give up
+  else {
+    closeStream();
+  }
+}
+
+bool GeneralCommTask::handleRequest(WorkItem::uptr<RestHandler> handler) {
+  if (handler->isDirect()) {
+    handleRequestDirectly(std::move(handler));
+    return true;
+  }
+
+  if (_server->tryActive()) {
+    handleRequestDirectly(std::move(handler));
+    return true;
+  }
+
+  bool startThread = handler->needsOwnThread();
+
+  if (startThread) {
+    JobGuard guard(_loop._scheduler);
+
+    guard.block();
+    handleRequestDirectly(std::move(handler));
+    return true;
+  }
+
+  // ok, we need to queue the request
+  auto self = this;
+
+  return _server->queue(std::move(handler), [self](WorkItem::uptr<RestHandler> h) {
+    self->handleRequestDirectly(std::move(h));
+  });
+}
+
+void GeneralCommTask::handleRequestDirectly(WorkItem::uptr<RestHandler> h) {
+  HandlerWorkStack work(std::move(h));
+  auto handler = work.handler();
+
+  RequestStatisticsAgent::transferTo(handler);
+  RestHandler::status result = handler->executeFull();
+  handler->RequestStatisticsAgent::transferTo(this);
+
+  switch (result) {
+    case RestHandler::status::FAILED:
+    case RestHandler::status::DONE: {
+      addResponse(handler->response());
+      break;
+    }
+
+    case RestHandler::status::ASYNC:
+      handler->release();
+      break;
+  }
+}
+
+bool GeneralCommTask::handleRequestAsync(WorkItem::uptr<RestHandler> handler,
+                                       uint64_t* jobId) {
+#if 0
+  bool startThread = startThread();
+
+  // extract the coordinator flag
+  bool found;
+  std::string const& hdrStr =
+      handler->request()->header(StaticStrings::Coordinator, found);
+  char const* hdr = found ? hdrStr.c_str() : nullptr;
+
+  // execute the handler using the dispatcher
+  std::unique_ptr<Job> job =
+      std::make_unique<HttpServerJob>(this, handler, true);
+  task->RequestStatisticsAgent::transferTo(job.get());
+
+  // register the job with the job manager
+  if (jobId != nullptr) {
+    GeneralServerFeature::JOB_MANAGER->initAsyncJob(
+        static_cast<HttpServerJob*>(job.get()), hdr);
+    *jobId = job->jobId();
+  }
+
+  // execute the handler using the dispatcher
+  int res = DispatcherFeature::DISPATCHER->addJob(job, startThread);
+
+  // could not add job to job queue
+  if (res != TRI_ERROR_NO_ERROR) {
+    job->requestStatisticsAgentSetExecuteError();
+    job->RequestStatisticsAgent::transferTo(task);
+    if (res != TRI_ERROR_DISPATCHER_IS_STOPPING) {
+      LOG(WARN) << "unable to add job to the job queue: "
+                << TRI_errno_string(res);
+    } else {
+      task->handleSimpleError(GeneralResponse::ResponseCode::SERVICE_UNAVAILABLE);
+      return true;
+    }
+    // todo send info to async work manager?
+    return false;
+  }
+
+  // job is in queue now
+  return res == TRI_ERROR_NO_ERROR;
+#endif
+}
+

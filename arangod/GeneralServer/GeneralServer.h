@@ -28,7 +28,9 @@
 
 #include "Scheduler/TaskManager.h"
 
-#include "Basics/Mutex.h"
+#include <boost/lockfree/queue.hpp>
+
+#include "Basics/ConditionVariable.h"
 #include "Endpoint/ConnectionInfo.h"
 #include "GeneralServer/GeneralDefinitions.h"
 #include "GeneralServer/HttpCommTask.h"
@@ -53,44 +55,61 @@ class GeneralServer : protected TaskManager {
   GeneralServer const& operator=(GeneralServer const&) = delete;
 
  public:
+  class Job {
+   public:
+    Job(WorkItem::uptr<RestHandler> handler,
+        std::function<void(WorkItem::uptr<RestHandler>)> callback)
+        : _handler(std::move(handler)), _callback(callback) {}
+
+   public:
+    WorkItem::uptr<RestHandler> _handler;
+    std::function<void(WorkItem::uptr<RestHandler>)> _callback;
+  };
+
+ public:
+  static size_t const STANDARD_QUEUE = 0;
+  static size_t const AQL_QUEUE = 1;
+  static size_t const SYSTEM_QUEUE_SIZE = 2;
+
+ public:
   static int sendChunk(uint64_t, std::string const&);
 
  public:
-  GeneralServer() = default;
+  explicit GeneralServer(boost::asio::io_service* ioService);
   virtual ~GeneralServer();
 
  public:
-  // adds the endpoint list
   void setEndpointList(const EndpointList* list);
-
-  // starts listening
   void startListening();
-
-  // stops listining
   void stopListening();
 
-  // creates a job for asynchronous execution
-  bool handleRequestAsync(GeneralCommTask*,
-                          arangodb::WorkItem::uptr<RestHandler>,
-                          uint64_t* jobId = nullptr);
+  bool queue(WorkItem::uptr<RestHandler>,
+             std::function<void(WorkItem::uptr<RestHandler>)>);
+  bool pop(size_t i, Job*& job) { return _queues[i]->pop(job); }
+  void wakeup();
+  void waitForWork();
 
-  // executes the handler directly or add it to the queue
-  bool handleRequest(GeneralCommTask*, arangodb::WorkItem::uptr<RestHandler>);
+  size_t active() const { return _active.load(); }
+  void incActive() { ++_active; }
+  void decActive() { --_active; }
+  bool tryActive() { return _active.load() < 10; }
 
  protected:
-  // opens a listen port
   bool openEndpoint(Endpoint* endpoint);
 
-  // handles request directly
-  void handleRequestDirectly(GeneralCommTask*,
-                             arangodb::WorkItem::uptr<RestHandler>);
-
  protected:
-  // active listen tasks
   std::vector<ListenTask*> _listenTasks;
-
-  // defined ports and addresses
   EndpointList const* _endpointList = nullptr;
+
+  boost::lockfree::queue<Job*> _queueStandard;
+  boost::lockfree::queue<Job*> _queueAql;
+  boost::lockfree::queue<Job*>* _queues[SYSTEM_QUEUE_SIZE];
+  std::atomic<size_t> _active;
+
+ private:
+  basics::ConditionVariable _queueCondition;
+  boost::asio::io_service* _ioService;
+  Thread* _queueWatcher = nullptr;
 };
 }
 }

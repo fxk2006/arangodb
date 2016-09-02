@@ -206,6 +206,8 @@ class SocketTask2 : virtual public Task2, public ConnectionStatisticsAgent {
 
   void completedWriteBuffer();
 
+  void closeStream();
+
  protected:
   ConnectionInfo _connectionInfo;
 
@@ -219,14 +221,18 @@ class SocketTask2 : virtual public Task2, public ConnectionStatisticsAgent {
 
   boost::asio::ip::tcp::socket _stream;
 
+ protected:
+  bool _closeRequested = false;
+
+ private:
+  bool reserveMemory();
+  bool trySyncRead();
   void asyncReadSome();
-  void syncReadSome();
-  void closeStream();
   void closeReceiveStream();
 
+ private:
   bool _closedSend = false;
   bool _closedReceive = false;
-  bool _closeRequested = false;
 };
 }
 }

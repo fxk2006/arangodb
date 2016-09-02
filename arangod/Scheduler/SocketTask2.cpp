@@ -19,7 +19,6 @@
 /// Copyright holder is ArangoDB GmbH, Cologne, Germany
 ///
 /// @author Dr. Frank Celler
-/// @author Achim Brandt
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "SocketTask2.h"
@@ -27,54 +26,15 @@
 #include "Basics/StringBuffer.h"
 #include "Basics/socket-utils.h"
 #include "Logger/Logger.h"
+#include "Scheduler/JobGuard.h"
 #include "Scheduler/Scheduler.h"
-
-#include <errno.h>
 
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-void disableNagle(int sock) {
-  int x = 1;
-
-  #ifdef SOL_TCP
-  int level = SOL_TCP;
-  #else
-  int level = SOL_SOCKET;
-  #endif
-
-  if (setsockopt(sock, level, TCP_NODELAY, (char*)&x, sizeof(x)))
-    LOG(ERR) << "disableNagle failed: ";
-
-  #ifdef SO_KEEPALIVE
-  if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&x, sizeof(x)))
-    LOG(ERR) << "SO_KEEPALIVE failed: ";
-
-  #ifdef __linux__
-  socklen_t len = sizeof(x);
-  if (getsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, &len))
-    LOG(ERR) << "can't get TCP_KEEPIDLE: ";
-
-  if (x > 300) {
-    x = 300;
-    if (setsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, sizeof(x))) {
-      LOG(ERR) << "can't set TCP_KEEPIDLE: ";
-    }
-  }
-
-  len = sizeof(x);  // just in case it changed
-  if (getsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, &len))
-    LOG(ERR) << "can't get TCP_KEEPINTVL: ";
-
-  if (x > 300) {
-    x = 300;
-    if (setsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, sizeof(x))) {
-      LOG(ERR) << "can't set TCP_KEEPINTVL: ";
-    }
-  }
-  #endif
-  #endif
-}
+// -----------------------------------------------------------------------------
+// --SECTION--                                      constructors and destructors
+// -----------------------------------------------------------------------------
 
 SocketTask2::SocketTask2(EventLoop2 loop, TRI_socket_t socket,
                          double keepAliveTimeout)
@@ -84,23 +44,25 @@ SocketTask2::SocketTask2(EventLoop2 loop, TRI_socket_t socket,
   ConnectionStatisticsAgent::acquire();
   connectionStatisticsAgentSetStart();
 
-  disableNagle(socket.fileDescriptor);
-
   boost::system::error_code ec;
   _stream.assign(boost::asio::ip::tcp::v4(), socket.fileDescriptor, ec);
 
   _stream.non_blocking(false);
-  
+
   if (ec) {
     LOG_TOPIC(ERR, Logger::COMMUNICATION) << "cannot create stream from socket"
                                           << ec;
     _closedSend = true;
     _closedReceive = true;
   } else {
-    LOG_TOPIC(ERR, Logger::COMMUNICATION) << "FIXME ASSIGNED "
-                                          << socket.fileDescriptor;
+    LOG_TOPIC(ERR, Logger::COMMUNICATION) << "connection on "
+                                          << _stream.native_handle();
   }
 }
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                    public methods
+// -----------------------------------------------------------------------------
 
 void SocketTask2::start() {
   if (_closedSend || _closedReceive) {
@@ -114,144 +76,15 @@ void SocketTask2::start() {
     return;
   }
 
-  LOG(ERR) << "### startRead";
+  LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "starting communication on "
+                                          << _stream.native_handle();
+
   _loop._ioService.post([this]() { asyncReadSome(); });
 }
 
-void SocketTask2::asyncReadSome() {
-  while (true) {
-    // reserve some memory for reading
-    if (_readBuffer->reserve(READ_BLOCK_SIZE + 1) == TRI_ERROR_OUT_OF_MEMORY) {
-      LOG(WARN) << "out of memory while reading from client";
-      closeStream();
-      return;
-    }
-
-    try {
-      LOG_TOPIC(INFO, Logger::REQUESTS)
-	<< "vor_read_some;"
-	<< uint64_t(TRI_microtime() * 1000000) << ";"
-	<< Thread::currentThreadId() << ";";
-      auto xxx = boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE);
-      LOG_TOPIC(INFO, Logger::REQUESTS)
-	<< "direkt_vor_read_some;"
-	<< uint64_t(TRI_microtime() * 1000000) << ";"
-	<< Thread::currentThreadId() << ";";
-      size_t bytesRead = _stream.read_some(xxx);
-      LOG_TOPIC(INFO, Logger::REQUESTS)
-	<< "nach_read_some;"
-	<< uint64_t(TRI_microtime() * 1000000) << ";"
-	<< Thread::currentThreadId() << ";"
-        << bytesRead << ";";
-
-      //LOG(ERR) << "INPUT: " << StringUtils::escapeC(std::string(_readBuffer->end(), bytesRead))
-      // << " " << bytesRead << " " << _readBuffer->end();
-
-      if (0 < bytesRead) {
-	_readBuffer->increaseLength(bytesRead);
-
-	while (processRead()) {
-	  if (_closeRequested) {
-	    break;
-	  }
-	}
-  
-	if (_closeRequested) {
-	  LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
-	    << "close requested, closing receive stream";
-
-	  closeReceiveStream();
-	  return;
-	} else {
-	  continue;
-	}
-      }
-    } catch (boost::system::system_error err) {
-      if (err.code() != boost::asio::error::would_block) {
-	LOG(ERR) << "CLOSED NO WOULD BLOCK " << err.what();
-	closeStream();
-	return;
-      }
-    }
-
-    break;
-  }
-
-  // try to read more bytes
-  _stream.async_read_some(
-      boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE),
-      [this](const boost::system::error_code& ec, std::size_t transferred) {
-        if (ec) {
-          LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
-              << "read on stream " << _stream.native_handle() << " failed with "
-              << ec;
-          closeStream();
-        } else {
-          _readBuffer->increaseLength(transferred);
-
-          while (processRead()) {
-            if (_closeRequested) {
-              break;
-            }
-          }
-
-          if (_closeRequested) {
-            LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
-                << "close requested, closing receive stream";
-
-            closeReceiveStream();
-          } else {
-            asyncReadSome();
-          }
-        }
-      });
-}
-
-void SocketTask2::closeStream() {
-  if (!_closedSend) {
-    try {
-      _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
-    } catch (boost::system::system_error err) {
-      LOG(WARN) << "shutdown send stream " << _stream.native_handle()
-                << " failed with " << err.what();
-    }
-
-    _closedSend = true;
-  }
-
-  if (!_closedReceive) {
-    try {
-      _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
-    } catch (boost::system::system_error err) {
-      LOG(WARN) << "shutdown send stream " << _stream.native_handle()
-                << " failed with " << err.what();
-    }
-
-    _closedReceive = true;
-  }
-
-  try {
-    _stream.close();
-  } catch (boost::system::system_error err) {
-    LOG(WARN) << "close stream " << _stream.native_handle() << " failed with "
-              << err.what();
-  }
-
-  _closeRequested = false;
-}
-
-void SocketTask2::closeReceiveStream() {
-  if (!_closedReceive) {
-    try {
-      _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
-    } catch (boost::system::system_error err) {
-      LOG(WARN) << "shutdown receive stream " << _stream.native_handle()
-                << " failed with " << err.what();
-    }
-
-    _closedReceive = true;
-  }
-}
+// -----------------------------------------------------------------------------
+// --SECTION--                                                 protected methods
+// -----------------------------------------------------------------------------
 
 void SocketTask2::addWriteBuffer(std::unique_ptr<basics::StringBuffer> buffer,
                                  RequestStatisticsAgent* statistics) {
@@ -261,16 +94,8 @@ void SocketTask2::addWriteBuffer(std::unique_ptr<basics::StringBuffer> buffer,
   addWriteBuffer(buffer.release(), stat);
 }
 
-#include <iostream>
-
 void SocketTask2::addWriteBuffer(basics::StringBuffer* buffer,
                                  TRI_request_statistics_t* stat) {
-  LOG_TOPIC(INFO, Logger::REQUESTS)
-    << "stop;"
-    << uint64_t(TRI_microtime() * 1000000) << ";"
-    << (void*) this << ";"
-    << Thread::currentThreadId() << ";";
-
   if (_closedSend) {
     LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
         << "dropping output, send stream already closed";
@@ -298,32 +123,23 @@ void SocketTask2::addWriteBuffer(basics::StringBuffer* buffer,
     size_t total = _writeBuffer->length();
     size_t written = 0;
 
-    // LOG(ERR) << "OUTPUT: " << StringUtils::escapeC(std::string(_writeBuffer->begin(), _writeBuffer->length())) << " " << _writeBuffer->length();
-
     try {
-      written = _stream.write_some(boost::asio::buffer(_writeBuffer->begin(), _writeBuffer->length()));
+      written = _stream.write_some(
+          boost::asio::buffer(_writeBuffer->begin(), _writeBuffer->length()));
 
       if (written == total) {
-	LOG_TOPIC(INFO, Logger::REQUESTS)
-	  << "stop2;"
-	  << uint64_t(TRI_microtime() * 1000000) << ";"
-	  << (void*) this << ";"
-	  << Thread::currentThreadId() << ";";
-
-	completedWriteBuffer();
-	return;
+        completedWriteBuffer();
+        return;
       }
     } catch (boost::system::system_error err) {
       if (err.code() != boost::asio::error::would_block) {
-	LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "write on stream "
-						<< _stream.native_handle()
-						<< " failed with " << err.what();
-	closeStream();
-	return;
+        LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+            << "write on stream " << _stream.native_handle() << " failed with "
+            << err.what();
+        closeStream();
+        return;
       }
     }
-
-    LOG(ERR) << "NO DIRECT";
 
     boost::asio::async_write(
         _stream,
@@ -369,4 +185,175 @@ void SocketTask2::completedWriteBuffer() {
   _writeBuffersStats.pop_front();
 
   addWriteBuffer(buffer, statistics);
+}
+
+void SocketTask2::closeStream() {
+  if (!_closedSend) {
+    try {
+      _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+    } catch (boost::system::system_error err) {
+      LOG(WARN) << "shutdown send stream " << _stream.native_handle()
+                << " failed with " << err.what();
+    }
+
+    _closedSend = true;
+  }
+
+  if (!_closedReceive) {
+    try {
+      _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
+    } catch (boost::system::system_error err) {
+      LOG(WARN) << "shutdown send stream " << _stream.native_handle()
+                << " failed with " << err.what();
+    }
+
+    _closedReceive = true;
+  }
+
+  try {
+    _stream.close();
+  } catch (boost::system::system_error err) {
+    LOG(WARN) << "close stream " << _stream.native_handle() << " failed with "
+              << err.what();
+  }
+
+  _closeRequested = false;
+}
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                   private methods
+// -----------------------------------------------------------------------------
+
+bool SocketTask2::reserveMemory() {
+  if (_readBuffer->reserve(READ_BLOCK_SIZE + 1) == TRI_ERROR_OUT_OF_MEMORY) {
+    LOG(WARN) << "out of memory while reading from client";
+    closeStream();
+    return false;
+  }
+
+  return true;
+}
+
+bool SocketTask2::trySyncRead() {
+  try {
+    if (0 == _stream.available()) {
+      return false;
+    }
+
+    size_t bytesRead = _stream.read_some(
+        boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE));
+
+    if (0 == bytesRead) {
+      return false;  // should not happen
+    }
+
+    _readBuffer->increaseLength(bytesRead);
+    return true;
+  } catch (boost::system::system_error err) {
+    if (err.code() == boost::asio::error::would_block) {
+      return false;
+    }
+
+    throw err;
+  }
+}
+
+void SocketTask2::asyncReadSome() {
+  auto info = _stream.native_handle();
+
+  try {
+    JobGuard guard(_loop._scheduler);
+
+    while (guard.tryDirect()) {
+      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "directly handling on "
+                                              << info;
+
+      if (!reserveMemory()) {
+        LOG_TOPIC(TRACE, Logger::COMMUNICATION)
+            << "failed to reserve memory for " << info;
+
+        return;
+      }
+
+      if (!trySyncRead()) {
+        LOG_TOPIC(TRACE, Logger::COMMUNICATION)
+            << "cannot read data synchronously " << info
+            << ", falling back to asynchronous read";
+
+        break;
+      }
+
+      while (processRead()) {
+        if (_closeRequested) {
+          break;
+        }
+      }
+
+      if (_closeRequested) {
+        LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+            << "close requested, closing receive stream " << info;
+
+        closeReceiveStream();
+        return;
+      }
+
+      guard.release();
+    }
+  } catch (boost::system::system_error err) {
+    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "i/o stream " << info
+                                            << " failed with " << err.what();
+
+    closeStream();
+    return;
+  } catch (...) {
+    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "general error on stream "
+                                            << info;
+
+    closeStream();
+    return;
+  }
+
+  // try to read more bytes
+  _stream.async_read_some(
+      boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE),
+      [this, info](const boost::system::error_code& ec,
+                   std::size_t transferred) {
+        if (ec) {
+          LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "read on stream " << info
+                                                  << " failed with " << ec;
+          closeStream();
+        } else {
+          _readBuffer->increaseLength(transferred);
+
+          while (processRead()) {
+            if (_closeRequested) {
+              break;
+            }
+          }
+
+          if (_closeRequested) {
+            LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+                << "close requested, closing receive stream";
+
+            closeReceiveStream();
+          } else {
+            asyncReadSome();
+          }
+        }
+      });
+}
+
+void SocketTask2::closeReceiveStream() {
+  auto info = _stream.native_handle();
+
+  if (!_closedReceive) {
+    try {
+      _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
+    } catch (boost::system::system_error err) {
+      LOG(WARN) << "shutdown receive stream " << info << " failed with "
+                << err.what();
+    }
+
+    _closedReceive = true;
+  }
 }

@@ -147,25 +147,28 @@ class GeneralCommTask : public SocketTask2, public RequestStatisticsAgent {
 
   void processResponse(GeneralResponse*);
 
-  virtual void handleSimpleError(rest::ResponseCode,
-                                 uint64_t messagid) = 0;
+  virtual void handleSimpleError(rest::ResponseCode, uint64_t messagid) = 0;
+
   virtual void handleSimpleError(rest::ResponseCode, int code,
                                  std::string const& errorMessage,
                                  uint64_t messageId) = 0;
 
- private:
-  void handleTimeout() /* override final */ { /* _clientClosed = true; */ }
-  void signalTask(std::unique_ptr<TaskData>) override;
-
  protected:
-  // for asynchronous requests
   GeneralServer* const _server;
 
   // protocol to use http, vpp
   char const* _protocol = "unknown";
+  rest::ProtocolVersion _protocolVersion = rest::ProtocolVersion::UNKNOWN;
 
-  rest::ProtocolVersion _protocolVersion =
-      rest::ProtocolVersion::UNKNOWN;
+ private:
+  void handleTimeout() /* override final */ { /* _clientClosed = true; */
+  }
+
+  void signalTask(std::unique_ptr<TaskData>) override;
+
+  bool handleRequest(WorkItem::uptr<RestHandler>);
+  void handleRequestDirectly(WorkItem::uptr<RestHandler>);
+  bool handleRequestAsync(WorkItem::uptr<RestHandler>, uint64_t* jobId = nullptr);
 };
 }
 }

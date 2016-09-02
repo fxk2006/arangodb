@@ -72,6 +72,31 @@ class Scheduler : private TaskManager {
   virtual ~Scheduler();
 
  public:
+  boost::asio::io_service* ioService() const {
+    return _ioService;
+  }
+
+  bool tryDirectThread() {
+    if (_directUse + _blocked < nrThreads) {
+      ++_directUse;
+      return true;
+    }
+    
+    return false;
+  }
+
+  void undirectThread() {
+    --_directUse;
+  }
+
+  void blockThread() {
+    ++_blocked;
+  }
+
+  void unblockThread() {
+    --_blocked;
+  }
+  
   //////////////////////////////////////////////////////////////////////////////
   /// @brief starts scheduler, keeps running
   ///
@@ -378,6 +403,12 @@ class Scheduler : private TaskManager {
   //////////////////////////////////////////////////////////////////////////////
 
   size_t _affinityPos = 0;
+
+  boost::asio::io_service* _ioService;
+
+  std::atomic<size_t> _blocked;
+  std::atomic<size_t> _directUse;
+
 };
 }
 }

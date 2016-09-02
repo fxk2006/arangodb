@@ -24,6 +24,7 @@
 
 #include "GeneralServer.h"
 
+#include "Basics/ConditionLocker.h"
 #include "Basics/MutexLocker.h"
 #include "Basics/WorkMonitor.h"
 #include "Dispatcher/Dispatcher.h"
@@ -44,9 +45,70 @@ using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief destroys an endpoint server
-////////////////////////////////////////////////////////////////////////////////
+namespace {
+class GeneralServerThread : public Thread {
+ public:
+  GeneralServerThread(GeneralServer* server, boost::asio::io_service* ioService)
+      : Thread("GeneralServerThread"), _server(server), _ioService(ioService) {}
+
+  ~GeneralServerThread() { shutdown(); }
+
+  void beginShutdown() {
+    Thread::beginShutdown();
+    _server->wakeup();
+  }
+
+ public:
+  void run() {
+    int idleTries = 0;
+    auto server = _server;
+
+    // iterate until we are shutting down
+    while (!isStopping()) {
+      ++idleTries;
+
+      for (size_t i = 0; i < GeneralServer::SYSTEM_QUEUE_SIZE; ++i) {
+        GeneralServer::Job* job = nullptr;
+        size_t active = _server->active();
+
+        while (_server->tryActive() && _server->pop(i, job)) {
+          LOG_TOPIC(TRACE, Logger::COMMUNICATION)
+              << "queuing next job, currently active " << active;
+
+          _server->incActive();
+          idleTries = 0;
+
+          _ioService->dispatch([server, job]() {
+            job->_callback(std::move(job->_handler));
+            server->decActive();
+            server->wakeup();
+            delete job;
+          });
+
+          active = _server->active();
+        }
+      }
+
+      // we need to check again if more work has arrived after we have
+      // aquired the lock. The lockfree queue and _nrWaiting are accessed
+      // using "memory_order_seq_cst", this guarantees that we do not
+      // miss a signal.
+
+      if (idleTries >= 2) {
+        _server->waitForWork();
+      }
+    }
+  }
+
+ private:
+  GeneralServer* _server;
+  boost::asio::io_service* _ioService;
+};
+}
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                             static public methods
+// -----------------------------------------------------------------------------
 
 int GeneralServer::sendChunk(uint64_t taskId, std::string const& data) {
   auto taskData = std::make_unique<TaskData>();
@@ -61,23 +123,28 @@ int GeneralServer::sendChunk(uint64_t taskId, std::string const& data) {
   return TRI_ERROR_NO_ERROR;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief destructs a general server
-////////////////////////////////////////////////////////////////////////////////
+// -----------------------------------------------------------------------------
+// --SECTION--                                      constructors and destructors
+// -----------------------------------------------------------------------------
+
+GeneralServer::GeneralServer(boost::asio::io_service* ioService)
+  : _queueStandard(1024),
+    _queueAql(1024),
+    _queues{&_queueStandard, &_queueAql},
+    _active(0), _ioService(ioService) {
+  _queueWatcher = new GeneralServerThread(this, _ioService);
+}
 
 GeneralServer::~GeneralServer() { stopListening(); }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief add the endpoint list
-////////////////////////////////////////////////////////////////////////////////
+// -----------------------------------------------------------------------------
+// --SECTION--                                                    public
+// methods
+// -----------------------------------------------------------------------------
 
 void GeneralServer::setEndpointList(EndpointList const* list) {
   _endpointList = list;
 }
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief starts listening
-////////////////////////////////////////////////////////////////////////////////
 
 void GeneralServer::startListening() {
   for (auto& it : _endpointList->allEndpoints()) {
@@ -96,13 +163,13 @@ void GeneralServer::startListening() {
       FATAL_ERROR_EXIT();
     }
   }
+
+  _queueWatcher->start();
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief removes all listen and comm tasks
-////////////////////////////////////////////////////////////////////////////////
-
 void GeneralServer::stopListening() {
+  _queueWatcher->beginShutdown();
+
   for (auto& task : _listenTasks) {
     SchedulerFeature::SCHEDULER->destroyTask(task);
   }
@@ -110,84 +177,51 @@ void GeneralServer::stopListening() {
   _listenTasks.clear();
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief create a job for asynchronous execution (using the dispatcher)
-////////////////////////////////////////////////////////////////////////////////
+bool GeneralServer::queue(
+    WorkItem::uptr<RestHandler> handler,
+    std::function<void(WorkItem::uptr<RestHandler>)> callback) {
+  size_t queue = handler->queue();
+  auto job = new GeneralServer::Job(std::move(handler), callback);
 
-bool GeneralServer::handleRequestAsync(GeneralCommTask* task,
-                                       WorkItem::uptr<RestHandler> handler,
-                                       uint64_t* jobId) {
-  bool startThread = handler->needsOwnThread();
-
-  // extract the coordinator flag
-  bool found;
-  std::string const& hdrStr =
-      handler->request()->header(StaticStrings::Coordinator, found);
-  char const* hdr = found ? hdrStr.c_str() : nullptr;
-
-  // execute the handler using the dispatcher
-  std::unique_ptr<Job> job =
-    std::make_unique<GeneralServerJob>(this, std::move(handler), task, true);
-  task->RequestStatisticsAgent::transferTo(job.get());
-
-  // register the job with the job manager
-  if (jobId != nullptr) {
-    GeneralServerFeature::JOB_MANAGER->initAsyncJob(
-        static_cast<GeneralServerJob*>(job.get()), hdr);
-    *jobId = job->jobId();
-  }
-
-  // execute the handler using the dispatcher
-  int res = DispatcherFeature::DISPATCHER->addJob(job, startThread);
-
-  // could not add job to job queue
-  if (res != TRI_ERROR_NO_ERROR) {
-    job->requestStatisticsAgentSetExecuteError();
-    job->RequestStatisticsAgent::transferTo(task);
-    if (res != TRI_ERROR_DISPATCHER_IS_STOPPING) {
-      LOG(WARN) << "unable to add job to the job queue: "
-                << TRI_errno_string(res);
-    }
-    // TODO send info to async work manager?
+  try {
+    _queues[queue]->push(job);
+  } catch (...) {
+    wakeup();
+    delete job;
     return false;
   }
 
-  // job is in queue now
-  return res == TRI_ERROR_NO_ERROR;
+  wakeup();
+  return true;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief executes the handler directly or add it to the queue
-////////////////////////////////////////////////////////////////////////////////
+void GeneralServer::wakeup() {
+  CONDITION_LOCKER(guard, _queueCondition);
 
-bool GeneralServer::handleRequest(GeneralCommTask* task,
-                                  WorkItem::uptr<RestHandler> handler) {
-  // direct handlers
-  if (handler->isDirect()) {
-    handleRequestDirectly(task, std::move(handler));
-    return true;
+  guard.signal();
+}
+
+void GeneralServer::waitForWork() {
+  static uint64_t n = 0;
+
+  CONDITION_LOCKER(guard, _queueCondition);
+
+  for (size_t i = 0; i < SYSTEM_QUEUE_SIZE; ++i) {
+    if (!_queues[i]->empty()) {
+      return;
+    }
   }
 
-  bool startThread = handler->needsOwnThread();
+  // wait at most 1000ms
+  uint64_t waitTime = (1 + (((++n) >> 3) % 9)) * 100 * 1000;
 
-  // use a dispatcher queue, handler belongs to the job
-  std::unique_ptr<Job> job =
-    std::make_unique<GeneralServerJob>(this, std::move(handler), task);
-  task->RequestStatisticsAgent::transferTo(job.get());
-
-  LOG(TRACE) << "GeneralCommTask " << (void*)task
-             << " created GeneralServerJob " << (void*)job.get();
-
-  // add the job to the dispatcher
-  int res = DispatcherFeature::DISPATCHER->addJob(job, startThread);
-
-  // job is in queue now
-  return res == TRI_ERROR_NO_ERROR;
+  guard.wait(waitTime);
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief opens a listen port
-////////////////////////////////////////////////////////////////////////////////
+// -----------------------------------------------------------------------------
+// --SECTION--                                                 protected
+// methods
+// -----------------------------------------------------------------------------
 
 bool GeneralServer::openEndpoint(Endpoint* endpoint) {
   ProtocolType protocolType;
@@ -209,7 +243,8 @@ bool GeneralServer::openEndpoint(Endpoint* endpoint) {
   ListenTask* task = new GeneralListenTask(this, endpoint, protocolType);
 
   // ...................................................................
-  // For some reason we have failed in our endeavor to bind to the socket -
+  // For some reason we have failed in our endeavor to bind to the socket
+  // -
   // this effectively terminates the server
   // ...................................................................
 
@@ -226,29 +261,4 @@ bool GeneralServer::openEndpoint(Endpoint* endpoint) {
   }
 
   return false;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief handle request directly
-////////////////////////////////////////////////////////////////////////////////
-
-void GeneralServer::handleRequestDirectly(GeneralCommTask* task,
-                                          WorkItem::uptr<RestHandler> handler) {
-  HandlerWorkStack work(std::move(handler));
-
-  task->RequestStatisticsAgent::transferTo(work.handler());
-  RestHandler::status result = work.handler()->executeFull();
-  work.handler()->RequestStatisticsAgent::transferTo(task);
-
-  switch (result) {
-    case RestHandler::status::FAILED:
-    case RestHandler::status::DONE: {
-      task->addResponse(work.handler()->response());
-      break;
-    }
-
-    case RestHandler::status::ASYNC:
-      handler.release();
-      break;
-  }
 }
