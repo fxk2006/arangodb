@@ -26,7 +26,6 @@
 #include "Logger/Logger.h"
 #include "Basics/Exceptions.h"
 #include "VocBase/DatafileHelper.h"
-#include "VocBase/collection.h"
 #include "VocBase/ticks.h"
 #include "Wal/DocumentOperation.h"
 #include "Wal/LogfileManager.h"
@@ -184,8 +183,7 @@ static void FreeOperations(TRI_transaction_t* trx) {
       continue;
     }
 
-    TRI_collection_t* document =
-        trxCollection->_collection->_collection;
+    arangodb::LogicalCollection* collection = trxCollection->_collection;
 
     if (mustRollback) {
       // revert all operations
@@ -221,8 +219,7 @@ static void FreeOperations(TRI_transaction_t* trx) {
 
       // now update the stats for all datafiles of the collection in one go
       for (auto const& it : stats) {
-        document->_datafileStatistics.increaseDead(it.first, it.second.first,
-                                                   it.second.second);
+        trxCollection->_collection->increaseDeadStats(it.first, it.second.first, it.second.second);
       }
     }
 
@@ -234,11 +231,10 @@ static void FreeOperations(TRI_transaction_t* trx) {
     }
 
     if (mustRollback) {
-      document->_info.setRevision(trxCollection->_originalRevision, true);
-    } else if (!document->_info.isVolatile() && !isSingleOperation) {
+      collection->setRevision(trxCollection->_originalRevision, true);
+    } else if (!collection->isVolatile() && !isSingleOperation) {
       // only count logfileEntries if the collection is durable
-      document->_uncollectedLogfileEntries +=
-          trxCollection->_operations->size();
+      collection->increaseUncollectedLogfileEntries(trxCollection->_operations->size());
     }
 
     delete trxCollection->_operations;
@@ -281,47 +277,6 @@ static TRI_transaction_collection_t* FindCollection(
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief create a transaction collection container
-////////////////////////////////////////////////////////////////////////////////
-
-static TRI_transaction_collection_t* CreateCollection(
-    TRI_transaction_t* trx, TRI_voc_cid_t cid,
-    TRI_transaction_type_e accessType, int nestingLevel) {
-  TRI_transaction_collection_t* trxCollection =
-      static_cast<TRI_transaction_collection_t*>(TRI_Allocate(
-          TRI_UNKNOWN_MEM_ZONE, sizeof(TRI_transaction_collection_t), false));
-
-  if (trxCollection == nullptr) {
-    // OOM
-    return nullptr;
-  }
-
-  // initialize collection properties
-  trxCollection->_transaction = trx;
-  trxCollection->_cid = cid;
-  trxCollection->_accessType = accessType;
-  trxCollection->_nestingLevel = nestingLevel;
-  trxCollection->_collection = nullptr;
-  trxCollection->_operations = nullptr;
-  trxCollection->_originalRevision = 0;
-  trxCollection->_lockType = TRI_TRANSACTION_NONE;
-  trxCollection->_compactionLocked = false;
-  trxCollection->_waitForSync = false;
-
-  return trxCollection;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief free a transaction collection container
-////////////////////////////////////////////////////////////////////////////////
-
-static void FreeCollection(TRI_transaction_collection_t* trxCollection) {
-  TRI_ASSERT(trxCollection != nullptr);
-
-  TRI_Free(TRI_UNKNOWN_MEM_ZONE, trxCollection);
-}
-
-////////////////////////////////////////////////////////////////////////////////
 /// @brief lock a collection
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -349,26 +304,28 @@ static int LockCollection(TRI_transaction_collection_t* trxCollection,
     }
   }
 
-  TRI_ASSERT(trxCollection->_collection->_collection != nullptr);
   TRI_ASSERT(!IsLocked(trxCollection));
 
-  TRI_collection_t* document = trxCollection->_collection->_collection;
-  TRI_ASSERT(document != nullptr);
+  LogicalCollection* collection = trxCollection->_collection;
+  TRI_ASSERT(collection != nullptr);
   uint64_t timeout = trx->_timeout;
   if (HasHint(trxCollection->_transaction, TRI_TRANSACTION_HINT_TRY_LOCK)) {
     // give up if we cannot acquire the lock instantly
     timeout = 1 * 100;
   }
+  
+  bool const useDeadlockDetector = !IsSingleOperationTransaction(trx);
 
   int res;
   if (type == TRI_TRANSACTION_READ) {
     LOG_TRX(trx, nestingLevel) << "read-locking collection " << trxCollection->_cid;
-    res = document->beginReadTimed(timeout,
-                                   TRI_TRANSACTION_DEFAULT_SLEEP_DURATION);
+    res = collection->beginReadTimed(useDeadlockDetector, timeout,
+                                     TRI_TRANSACTION_DEFAULT_SLEEP_DURATION);
   } else {
-    LOG_TRX(trx, nestingLevel) << "write-locking collection " << trxCollection->_cid;
-    res = document->beginWriteTimed(timeout,
-                                    TRI_TRANSACTION_DEFAULT_SLEEP_DURATION);
+    LOG_TRX(trx, nestingLevel) << "write-locking collection "
+                               << trxCollection->_cid;
+    res = collection->beginWriteTimed(useDeadlockDetector, timeout,
+                                      TRI_TRANSACTION_DEFAULT_SLEEP_DURATION);
   }
 
   if (res == TRI_ERROR_NO_ERROR) {
@@ -404,7 +361,6 @@ static int UnlockCollection(TRI_transaction_collection_t* trxCollection,
     }
   }
 
-  TRI_ASSERT(trxCollection->_collection->_collection != nullptr);
   TRI_ASSERT(IsLocked(trxCollection));
 
   if (trxCollection->_nestingLevel < nestingLevel) {
@@ -425,14 +381,17 @@ static int UnlockCollection(TRI_transaction_collection_t* trxCollection,
     return TRI_ERROR_INTERNAL;
   }
 
-  TRI_collection_t* document = trxCollection->_collection->_collection;
-  TRI_ASSERT(document != nullptr);
+  TRI_transaction_t* trx = trxCollection->_transaction;
+  bool const useDeadlockDetector = !IsSingleOperationTransaction(trx);
+
+  LogicalCollection* collection = trxCollection->_collection;
+  TRI_ASSERT(collection != nullptr);
   if (trxCollection->_lockType == TRI_TRANSACTION_READ) {
     LOG_TRX(trxCollection->_transaction, nestingLevel) << "read-unlocking collection " << trxCollection->_cid;
-    document->endRead();
+    collection->endRead(useDeadlockDetector);
   } else {
     LOG_TRX(trxCollection->_transaction, nestingLevel) << "write-unlocking collection " << trxCollection->_cid;
-    document->endWrite();
+    collection->endWrite(useDeadlockDetector);
   }
 
   trxCollection->_lockType = TRI_TRANSACTION_NONE;
@@ -465,33 +424,31 @@ static int UseCollections(TRI_transaction_t* trx, int nestingLevel) {
         trxCollection->_collection = trx->_vocbase->lookupCollection(trxCollection->_cid);
       }
 
-      if (trxCollection->_collection == nullptr ||
-          trxCollection->_collection->_collection == nullptr) {
+      if (trxCollection->_collection == nullptr) {
         // something went wrong
         return TRI_errno();
       }
 
       if (trxCollection->_accessType == TRI_TRANSACTION_WRITE &&
           TRI_GetOperationModeServer() == TRI_VOCBASE_MODE_NO_CREATE &&
-          !TRI_collection_t::IsSystemName(
-              trxCollection->_collection->_collection->_info.name())) {
+          !LogicalCollection::IsSystemName(
+              trxCollection->_collection->name())) {
         return TRI_ERROR_ARANGO_READ_ONLY;
       }
 
       // store the waitForSync property
       trxCollection->_waitForSync =
-          trxCollection->_collection->_collection->_info.waitForSync();
+          trxCollection->_collection->waitForSync();
     }
 
     TRI_ASSERT(trxCollection->_collection != nullptr);
-    TRI_ASSERT(trxCollection->_collection->_collection != nullptr);
 
     if (nestingLevel == 0 &&
         trxCollection->_accessType == TRI_TRANSACTION_WRITE) {
       // read-lock the compaction lock
       if (!HasHint(trx, TRI_TRANSACTION_HINT_NO_COMPACTION_LOCK)) {
         if (!trxCollection->_compactionLocked) {
-          trxCollection->_collection->_collection->_compactionLock.readLock();
+          trxCollection->_collection->preventCompaction();
           trxCollection->_compactionLocked = true;
         }
       }
@@ -501,7 +458,7 @@ static int UseCollections(TRI_transaction_t* trx, int nestingLevel) {
         trxCollection->_originalRevision == 0) {
       // store original revision at transaction start
       trxCollection->_originalRevision =
-          trxCollection->_collection->_collection->_info.revision();
+          trxCollection->_collection->revision();
     }
 
     bool shouldLock = HasHint(trx, TRI_TRANSACTION_HINT_LOCK_ENTIRELY);
@@ -548,7 +505,7 @@ static int UnuseCollections(TRI_transaction_t* trx, int nestingLevel) {
         if (trxCollection->_accessType == TRI_TRANSACTION_WRITE &&
             trxCollection->_compactionLocked) {
           // read-unlock the compaction lock
-          trxCollection->_collection->_collection->_compactionLock.unlock();
+          trxCollection->_collection->allowCompaction();
           trxCollection->_compactionLocked = false;
         }
       }
@@ -610,18 +567,25 @@ static int WriteBeginMarker(TRI_transaction_t* trx) {
   try {
     arangodb::wal::TransactionMarker marker(TRI_DF_MARKER_VPACK_BEGIN_TRANSACTION, trx->_vocbase->id(), trx->_id);
     res = GetLogfileManager()->allocateAndWrite(marker, false).errorCode;
+    
+    TRI_IF_FAILURE("TransactionWriteBeginMarkerThrow") { 
+      throw std::bad_alloc();
+    }
 
     if (res == TRI_ERROR_NO_ERROR) {
       trx->_beginWritten = true;
+    } else {
+      THROW_ARANGO_EXCEPTION(res);
     }
   } catch (arangodb::basics::Exception const& ex) {
     res = ex.code();
+    LOG(WARN) << "could not save transaction begin marker in log: " << ex.what();
+  } catch (std::exception const& ex) {
+    res = TRI_ERROR_INTERNAL;
+    LOG(WARN) << "could not save transaction begin marker in log: " << ex.what();
   } catch (...) {
     res = TRI_ERROR_INTERNAL;
-  }
-
-  if (res != TRI_ERROR_NO_ERROR) {
-    LOG(WARN) << "could not save transaction begin marker in log: " << TRI_errno_string(res);
+    LOG(WARN) << "could not save transaction begin marker in log: unknown exception";
   }
 
   return res;
@@ -649,14 +613,23 @@ static int WriteAbortMarker(TRI_transaction_t* trx) {
   try {
     arangodb::wal::TransactionMarker marker(TRI_DF_MARKER_VPACK_ABORT_TRANSACTION, trx->_vocbase->id(), trx->_id);
     res = GetLogfileManager()->allocateAndWrite(marker, false).errorCode;
+    
+    TRI_IF_FAILURE("TransactionWriteAbortMarkerThrow") { 
+      throw std::bad_alloc();
+    }
+  
+    if (res != TRI_ERROR_NO_ERROR) {
+      THROW_ARANGO_EXCEPTION(res);
+    }
   } catch (arangodb::basics::Exception const& ex) {
     res = ex.code();
+    LOG(WARN) << "could not save transaction abort marker in log: " << ex.what();
+  } catch (std::exception const& ex) {
+    res = TRI_ERROR_INTERNAL;
+    LOG(WARN) << "could not save transaction abort marker in log: " << ex.what();
   } catch (...) {
     res = TRI_ERROR_INTERNAL;
-  }
-
-  if (res != TRI_ERROR_NO_ERROR) {
-    LOG(WARN) << "could not save transaction abort marker in log: " << TRI_errno_string(res);
+    LOG(WARN) << "could not save transaction abort marker in log: unknown exception";
   }
 
   return res;
@@ -692,15 +665,24 @@ static int WriteCommitMarker(TRI_transaction_t* trx) {
       // also sync RocksDB WAL
       RocksDBFeature::syncWal();
     }
+    
+    TRI_IF_FAILURE("TransactionWriteCommitMarkerThrow") { 
+      throw std::bad_alloc();
+    }
+    
+    if (res != TRI_ERROR_NO_ERROR) {
+      THROW_ARANGO_EXCEPTION(res);
+    }
 #endif
   } catch (arangodb::basics::Exception const& ex) {
     res = ex.code();
+    LOG(WARN) << "could not save transaction commit marker in log: " << ex.what();
+  } catch (std::exception const& ex) {
+    res = TRI_ERROR_INTERNAL;
+    LOG(WARN) << "could not save transaction commit marker in log: " << ex.what();
   } catch (...) {
     res = TRI_ERROR_INTERNAL;
-  }
-
-  if (res != TRI_ERROR_NO_ERROR) {
-    LOG(WARN) << "could not save transaction commit marker in log: " << TRI_errno_string(res);
+    LOG(WARN) << "could not save transaction commit marker in log: unknown exception";
   }
 
   return res;
@@ -852,18 +834,20 @@ int TRI_AddCollectionTransaction(TRI_transaction_t* trx, TRI_voc_cid_t cid,
   }
   
   // collection was not contained. now create and insert it
-  trxCollection = CreateCollection(trx, cid, accessType, nestingLevel);
-
-  if (trxCollection == nullptr) {
-    // out of memory
+  TRI_ASSERT(trxCollection == nullptr);
+  try {
+    trxCollection = new TRI_transaction_collection_t(trx, cid, accessType, nestingLevel);
+  } catch (...) {
     return TRI_ERROR_OUT_OF_MEMORY;
   }
+  
+  TRI_ASSERT(trxCollection != nullptr);
 
   // insert collection at the correct position
   try {
     trx->_collections.insert(trx->_collections.begin() + position, trxCollection);
   } catch (...) {
-    FreeCollection(trxCollection);
+    delete trxCollection;
 
     return TRI_ERROR_OUT_OF_MEMORY;
   }
@@ -974,7 +958,7 @@ int TRI_AddOperationTransaction(TRI_transaction_t* trx,
                                 bool& waitForSync) {
   TRI_ASSERT(operation.header != nullptr);
 
-  TRI_collection_t* document = operation.document;
+  LogicalCollection* collection = operation.collection;
   bool const isSingleOperationTransaction = IsSingleOperationTransaction(trx);
 
   if (HasHint(trx, TRI_TRANSACTION_HINT_RECOVERY)) {
@@ -982,7 +966,7 @@ int TRI_AddOperationTransaction(TRI_transaction_t* trx,
     waitForSync = false;
   } else if (!waitForSync) {
     // upgrade the info for the transaction based on the collection's settings
-    waitForSync |= document->_info.waitForSync();
+    waitForSync |= collection->waitForSync();
   }
 
   if (waitForSync) {
@@ -1029,7 +1013,7 @@ int TRI_AddOperationTransaction(TRI_transaction_t* trx,
 
     arangodb::wal::SlotInfoCopy slotInfo =
         arangodb::wal::LogfileManager::instance()->allocateAndWrite(
-            trx->_vocbase->id(), document->_info.id(), 
+            trx->_vocbase->id(), collection->cid(), 
             operation.marker, wakeUpSynchronizer,
             localWaitForSync, waitForTick);
     if (slotInfo.errorCode != TRI_ERROR_NO_ERROR) {
@@ -1082,21 +1066,21 @@ int TRI_AddOperationTransaction(TRI_transaction_t* trx,
     operation.handle();
 
     arangodb::aql::QueryCache::instance()->invalidate(
-        trx->_vocbase, document->_info.name());
+        trx->_vocbase, collection->name());
 
-    ++document->_uncollectedLogfileEntries;
+    collection->increaseUncollectedLogfileEntries(1);
 
     if (operation.type == TRI_VOC_DOCUMENT_OPERATION_UPDATE ||
         operation.type == TRI_VOC_DOCUMENT_OPERATION_REPLACE ||
         operation.type == TRI_VOC_DOCUMENT_OPERATION_REMOVE) {
       // update datafile statistics for the old header
-      document->_datafileStatistics.increaseDead(
-          operation.oldHeader.getFid(), 1, static_cast<int64_t>(operation.oldHeader.alignedMarkerSize()));
+      
+      collection->increaseDeadStats(operation.oldHeader.getFid(), 1, static_cast<int64_t>(operation.oldHeader.alignedMarkerSize()));
     }
   } else {
     // operation is buffered and might be rolled back
     TRI_transaction_collection_t* trxCollection = TRI_GetCollectionTransaction(
-        trx, document->_info.id(), TRI_TRANSACTION_WRITE);
+        trx, collection->cid(), TRI_TRANSACTION_WRITE);
     if (trxCollection->_operations == nullptr) {
       trxCollection->_operations = new std::vector<arangodb::wal::DocumentOperation*>;
       trxCollection->_operations->reserve(16);
@@ -1122,7 +1106,7 @@ int TRI_AddOperationTransaction(TRI_transaction_t* trx,
     copy->handle();
   }
 
-  document->setLastRevision(operation.rid, false);
+  collection->setRevision(operation.rid, false);
 
   TRI_IF_FAILURE("TransactionOperationAtEnd") { return TRI_ERROR_DEBUG; }
 
@@ -1328,7 +1312,7 @@ TRI_transaction_t::~TRI_transaction_t() {
 
   // free all collections
   for (auto it = _collections.rbegin(); it != _collections.rend(); ++it) {
-    FreeCollection(*it);
+    delete (*it);
   }
 }
 

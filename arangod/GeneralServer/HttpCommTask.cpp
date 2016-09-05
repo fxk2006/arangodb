@@ -36,9 +36,9 @@ using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-size_t const HttpCommTask::MaximalHeaderSize = 1 * 1024 * 1024;      //   1 MB
-size_t const HttpCommTask::MaximalBodySize = 512 * 1024 * 1024;      // 512 MB
-size_t const HttpCommTask::MaximalPipelineSize = 512 * 1024 * 1024;  // 512 MB
+size_t const HttpCommTask::MaximalHeaderSize = 2 * 1024 * 1024;       //    2 MB
+size_t const HttpCommTask::MaximalBodySize = 1024 * 1024 * 1024;      // 1024 MB
+size_t const HttpCommTask::MaximalPipelineSize = 1024 * 1024 * 1024;  // 1024 MB
 size_t const HttpCommTask::RunCompactEvery = 500;
 
 HttpCommTask::HttpCommTask(EventLoop2 loop, GeneralServer* server,
@@ -61,7 +61,8 @@ HttpCommTask::HttpCommTask(EventLoop2 loop, GeneralServer* server,
       _sinceCompactification(0),
       _originalBodyLength(0) {  // TODO(fc) remove
   _protocol = "http";
-  connectionStatisticsAgentSetHttp();
+  connectionStatisticsAgentSetHttp();  // old
+  _agents.emplace(std::make_pair(1UL, RequestStatisticsAgent(true)));
 }
 
 void HttpCommTask::handleSimpleError(rest::ResponseCode code,
@@ -72,7 +73,7 @@ void HttpCommTask::handleSimpleError(rest::ResponseCode code,
 
 void HttpCommTask::handleSimpleError(rest::ResponseCode code, int errorNum,
                                      std::string const& errorMessage,
-                                     uint64_t /* messageId */) {
+                                     uint64_t messageId) {
   std::unique_ptr<GeneralResponse> response(new HttpResponse(code));
 
   VPackBuilder builder;
@@ -166,10 +167,11 @@ void HttpCommTask::addResponse(HttpResponse* response) {
         << "\"";
   }
 
-  double const totalTime = RequestStatisticsAgent::elapsedSinceReadStart();
+  auto agent = getAgent(1);
+  double const totalTime = agent->elapsedSinceReadStart();
 
   // append write buffer and statistics
-  addWriteBuffer(std::move(buffer), this);
+  addWriteBuffer(std::move(buffer), agent);
 
   // and give some request information
   LOG_TOPIC(INFO, Logger::REQUESTS)
@@ -190,18 +192,20 @@ void HttpCommTask::addResponse(HttpResponse* response) {
 
 // reads data from the socket
 bool HttpCommTask::processRead() {
-  TRI_ASSERT(_readBuffer->c_str() != nullptr);
+  TRI_ASSERT(_readBuffer.c_str() != nullptr);
 
   if (_requestPending) {
     return false;
   }
 
+  auto agent = getAgent(1UL);
+
   bool handleRequest = false;
 
   // still trying to read the header fields
   if (!_readRequestBody) {
-    char const* ptr = _readBuffer->c_str() + _readPosition;
-    char const* etr = _readBuffer->end();
+    char const* ptr = _readBuffer.c_str() + _readPosition;
+    char const* etr = _readBuffer.end();
 
     if (ptr == etr) {
       return false;
@@ -210,7 +214,7 @@ bool HttpCommTask::processRead() {
     // starting a new request
     if (_newRequest) {
       // acquire a new statistics entry for the request
-      RequestStatisticsAgent::acquire();
+      agent->acquire();
 
 #if USE_DEV_TIMERS
       if (RequestStatisticsAgent::_statistics != nullptr) {
@@ -237,7 +241,7 @@ bool HttpCommTask::processRead() {
     }
 
     // request started
-    requestStatisticsAgentSetReadStart();
+    agent->requestStatisticsAgentSetReadStart();
 
     // check for the end of the request
     for (; ptr < end; ptr++) {
@@ -248,7 +252,7 @@ bool HttpCommTask::processRead() {
     }
 
     // check if header is too large
-    size_t headerLength = ptr - (_readBuffer->c_str() + _startPosition);
+    size_t headerLength = ptr - (_readBuffer.c_str() + _startPosition);
 
     if (headerLength > MaximalHeaderSize) {
       LOG(WARN) << "maximal header size is " << MaximalHeaderSize
@@ -263,17 +267,17 @@ bool HttpCommTask::processRead() {
 
     // header is complete
     if (ptr < end) {
-      _readPosition = ptr - _readBuffer->c_str() + 4;
+      _readPosition = ptr - _readBuffer.c_str() + 4;
 
       LOG(TRACE) << "HTTP READ FOR " << (void*)this << ": "
-                 << std::string(_readBuffer->c_str() + _startPosition,
+                 << std::string(_readBuffer.c_str() + _startPosition,
                                 _readPosition - _startPosition);
 
       // check that we know, how to serve this request and update the connection
       // information, i. e. client and server addresses and ports and create a
       // request context for that request
       _incompleteRequest.reset(new HttpRequest(
-          _connectionInfo, _readBuffer->c_str() + _startPosition,
+          _connectionInfo, _readBuffer.c_str() + _startPosition,
           _readPosition - _startPosition, _allowMethodOverride));
 
       GeneralServerFeature::HANDLER_FACTORY->setRequestContext(
@@ -351,7 +355,7 @@ bool HttpCommTask::processRead() {
       // (original request object gets deleted before responding)
       _requestType = _incompleteRequest->requestType();
 
-      requestStatisticsAgentSetRequestType(_requestType);
+      agent->requestStatisticsAgentSetRequestType(_requestType);
 
       // handle different HTTP methods
       switch (_requestType) {
@@ -391,7 +395,7 @@ bool HttpCommTask::processRead() {
           }
 
           LOG(WARN) << "got corrupted HTTP request '"
-                    << std::string(_readBuffer->c_str() + _startPosition, l)
+                    << std::string(_readBuffer.c_str() + _startPosition, l)
                     << "'";
 
           // force a socket close, response will be ignored!
@@ -422,7 +426,7 @@ bool HttpCommTask::processRead() {
         }
       }
     } else {
-      size_t l = (_readBuffer->end() - _readBuffer->c_str());
+      size_t l = (_readBuffer.end() - _readBuffer.c_str());
 
       if (_startPosition + 4 <= l) {
         _readPosition = l - 4;
@@ -432,18 +436,18 @@ bool HttpCommTask::processRead() {
 
   // readRequestBody might have changed, so cannot use else
   if (_readRequestBody) {
-    if (_readBuffer->length() - _bodyPosition < _bodyLength) {
-      // armKeepAliveTimeout();
+    if (_readBuffer.length() - _bodyPosition < _bodyLength) {
+      // TODO armKeepAliveTimeout();
 
       // let client send more
       return false;
     }
 
     // read "bodyLength" from read buffer and add this body to "httpRequest"
-    _incompleteRequest->setBody(_readBuffer->c_str() + _bodyPosition,
+    _incompleteRequest->setBody(_readBuffer.c_str() + _bodyPosition,
                                 _bodyLength);
 
-    LOG(TRACE) << "" << std::string(_readBuffer->c_str() + _bodyPosition,
+    LOG(TRACE) << "" << std::string(_readBuffer.c_str() + _bodyPosition,
                                     _bodyLength);
 
     // remove body from read buffer and reset read position
@@ -463,9 +467,9 @@ bool HttpCommTask::processRead() {
     return false;
   }
 
-  requestStatisticsAgentSetReadEnd();
-  requestStatisticsAgentAddReceivedBytes(_bodyPosition - _startPosition +
-                                         _bodyLength);
+  agent->requestStatisticsAgentSetReadEnd();
+  agent->requestStatisticsAgentAddReceivedBytes(_bodyPosition - _startPosition +
+                                                _bodyLength);
 
   bool const isOptionsRequest = (_requestType == rest::RequestType::OPTIONS);
   resetState();
@@ -474,6 +478,7 @@ bool HttpCommTask::processRead() {
   // keep-alive handling
   // .............................................................................
 
+  // header value can have any case. we'll lower-case it now
   std::string connectionType = StringUtils::tolower(
       _incompleteRequest->header(StaticStrings::Connection));
 
@@ -715,22 +720,22 @@ void HttpCommTask::resetState() {
 
   if (_sinceCompactification > RunCompactEvery) {
     compact = true;
-  } else if (_readBuffer->length() > MaximalPipelineSize) {
+  } else if (_readBuffer.length() > MaximalPipelineSize) {
     compact = true;
   }
 
   if (compact) {
-    _readBuffer->erase_front(_bodyPosition + _bodyLength);
+    _readBuffer.erase_front(_bodyPosition + _bodyLength);
 
     _sinceCompactification = 0;
     _readPosition = 0;
   } else {
     _readPosition = _bodyPosition + _bodyLength;
 
-    if (_readPosition == _readBuffer->length()) {
+    if (_readPosition == _readBuffer.length()) {
       _sinceCompactification = 0;
       _readPosition = 0;
-      _readBuffer->reset();
+      _readBuffer.reset();
     }
   }
 

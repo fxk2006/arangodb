@@ -146,7 +146,7 @@ class MMFilesEngine final : public StorageEngine {
   // the WAL entry for the collection creation will be written *after* the call
   // to "createCollection" returns
   std::string createCollection(TRI_vocbase_t* vocbase, TRI_voc_cid_t id,
-                               arangodb::VocbaseCollectionInfo const& parameters) override;
+                               arangodb::LogicalCollection const* parameters) override;
   
   // asks the storage engine to drop the specified collection and persist the 
   // deletion info. Note that physical deletion of the collection data must not 
@@ -161,17 +161,6 @@ class MMFilesEngine final : public StorageEngine {
   // perform a physical deletion of the collection
   void dropCollection(TRI_vocbase_t* vocbase, arangodb::LogicalCollection* collection) override;
   
-  // asks the storage engine to rename the collection as specified in the VPack
-  // Slice object and persist the renaming info. It is guaranteed by the server 
-  // that no other active collection with the same name and id exists in the same
-  // database when this function is called. If this operation fails somewhere in 
-  // the middle, the storage engine is required to fully revert the rename operation
-  // and throw only then, so that subsequent collection creation/rename requests will 
-  // not fail. the WAL entry for the rename will be written *after* the call
-  // to "renameCollection" returns
-  void renameCollection(TRI_vocbase_t* vocbase, TRI_voc_cid_t id,
-                        std::string const& name) override;
-  
   // asks the storage engine to change properties of the collection as specified in 
   // the VPack Slice object and persist them. If this operation fails 
   // somewhere in the middle, the storage engine is required to fully revert the 
@@ -179,7 +168,7 @@ class MMFilesEngine final : public StorageEngine {
   // the WAL entry for the propery change will be written *after* the call
   // to "changeCollection" returns
   void changeCollection(TRI_vocbase_t* vocbase, TRI_voc_cid_t id,
-                        arangodb::VocbaseCollectionInfo const& parameters,
+                        arangodb::LogicalCollection const* parameters,
                         bool doSync) override;
   
   // asks the storage engine to create an index as specified in the VPack
@@ -257,8 +246,28 @@ class MMFilesEngine final : public StorageEngine {
   int shutdownDatabase(TRI_vocbase_t* vocbase) override;
   
   int openCollection(TRI_vocbase_t* vocbase, LogicalCollection* collection, bool ignoreErrors) override;
+  
+  /// @brief transfer markers into a collection
+  int transferMarkers(LogicalCollection* collection, wal::CollectorCache*,
+                      wal::OperationsType const&) override;
 
  private:
+  /// @brief transfer markers into a collection, worker function
+  int transferMarkersWorker(LogicalCollection* collection, wal::CollectorCache*,
+                            wal::OperationsType const&);
+
+  /// @brief sync the active journal of a collection
+  int syncJournalCollection(LogicalCollection* collection);
+  
+  /// @brief get the next free position for a new marker of the specified size
+  char* nextFreeMarkerPosition(LogicalCollection* collection,
+                               TRI_voc_tick_t, TRI_df_marker_type_t,
+                               TRI_voc_size_t, wal::CollectorCache*);
+
+  /// @brief set the tick of a marker and calculate its CRC value
+  void finishMarker(char const*, char*, LogicalCollection* collection,
+                    TRI_voc_tick_t, wal::CollectorCache*);
+
   void verifyDirectories(); 
   std::vector<std::string> getDatabaseNames() const;
 
@@ -307,10 +316,10 @@ class MMFilesEngine final : public StorageEngine {
 
   void saveCollectionInfo(TRI_vocbase_t* vocbase,
                           TRI_voc_cid_t id,
-                          arangodb::VocbaseCollectionInfo const& parameters,
+                          arangodb::LogicalCollection const* parameters,
                           bool forceSync) const;
-  VocbaseCollectionInfo loadCollectionInfo(TRI_vocbase_t* vocbase,
-    std::string const& collectionName, std::string const& path, bool versionWarning);
+
+  LogicalCollection* loadCollectionInfo(TRI_vocbase_t* vocbase, std::string const& path);
   
   // start the cleanup thread for the database 
   int startCleanup(TRI_vocbase_t* vocbase);

@@ -151,9 +151,12 @@ class HashIndex final : public PathBasedIndex {
  public:
   HashIndex() = delete;
 
-  HashIndex(TRI_idx_iid_t, TRI_collection_t*,
+  HashIndex(TRI_idx_iid_t, arangodb::LogicalCollection*,
             std::vector<std::vector<arangodb::basics::AttributeName>> const&,
             bool, bool);
+
+  HashIndex(TRI_idx_iid_t, LogicalCollection*,
+            arangodb::velocypack::Slice const&);
 
   explicit HashIndex(VPackSlice const&);
 
@@ -177,6 +180,8 @@ class HashIndex final : public PathBasedIndex {
   void toVelocyPack(VPackBuilder&, bool) const override final;
   void toVelocyPackFigures(VPackBuilder&) const override final;
 
+  bool matchesDefinition(VPackSlice const& info) const override final;
+
   int insert(arangodb::Transaction*, struct TRI_doc_mptr_t const*,
              bool) override final;
 
@@ -186,6 +191,8 @@ class HashIndex final : public PathBasedIndex {
   int batchInsert(arangodb::Transaction*,
                   std::vector<TRI_doc_mptr_t const*> const*,
                   size_t) override final;
+  
+  int unload() override final;
 
   int sizeHint(arangodb::Transaction*, size_t) override final;
 

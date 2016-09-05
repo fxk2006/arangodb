@@ -211,7 +211,7 @@ class SocketTask2 : virtual public Task2, public ConnectionStatisticsAgent {
  protected:
   ConnectionInfo _connectionInfo;
 
-  basics::StringBuffer* _readBuffer = nullptr;
+  basics::StringBuffer _readBuffer;
 
   basics::StringBuffer* _writeBuffer = nullptr;
   TRI_request_statistics_t* _writeBufferStatistics = nullptr;

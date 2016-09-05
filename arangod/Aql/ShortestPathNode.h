@@ -40,6 +40,7 @@ namespace aql {
 /// @brief class ShortestPathNode
 class ShortestPathNode : public ExecutionNode {
   friend class ExecutionBlock;
+  friend class RedundantCalculationsReplacer;
   friend class ShortestPathBlock;
 
   /// @brief constructor with a vocbase and a collection name
@@ -56,7 +57,7 @@ class ShortestPathNode : public ExecutionNode {
  private:
   ShortestPathNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
                    std::vector<std::string> const& edgeColls,
-                   std::vector<TRI_edge_direction_e> directions,
+                   std::vector<TRI_edge_direction_e> const& directions,
                    Variable const* inStartVariable,
                    std::string const& startVertexId,
                    Variable const* inTargetVariable,

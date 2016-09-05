@@ -26,6 +26,8 @@
 
 #include "Basics/Common.h"
 #include "Basics/ReadWriteLock.h"
+#include "StorageEngine/MMFilesDatafileStatistics.h"
+#include "VocBase/Ditch.h"
 #include "VocBase/PhysicalCollection.h"
 
 struct TRI_datafile_t;
@@ -38,6 +40,14 @@ class MMFilesCollection final : public PhysicalCollection {
  friend class MMFilesCompactorThread;
  friend class MMFilesEngine;
 
+  struct DatafileDescription {
+    TRI_datafile_t const* _data;
+    TRI_voc_tick_t _dataMin;
+    TRI_voc_tick_t _dataMax;
+    TRI_voc_tick_t _tickMax;
+    bool _isJournal;
+  };
+
  public:
   explicit MMFilesCollection(LogicalCollection*);
   ~MMFilesCollection();
@@ -47,6 +57,7 @@ class MMFilesCollection final : public PhysicalCollection {
   void setRevision(TRI_voc_rid_t revision, bool force) override;
 
   int64_t initialCount() const override;
+  void updateCount(int64_t) override;
   
   /// @brief return engine-specific figures
   void figures(std::shared_ptr<arangodb::velocypack::Builder>&) override;
@@ -63,50 +74,86 @@ class MMFilesCollection final : public PhysicalCollection {
 
   /// @brief sync the active journal - will do nothing if there is no journal
   /// or if the journal is volatile
-  int syncActiveJournal() override;
+  int syncActiveJournal();
 
   int reserveJournalSpace(TRI_voc_tick_t tick, TRI_voc_size_t size,
-                          char*& resultPosition, TRI_datafile_t*& resultDatafile) override;
+                          char*& resultPosition, TRI_datafile_t*& resultDatafile);
 
   /// @brief create compactor file
-  TRI_datafile_t* createCompactor(TRI_voc_fid_t fid, TRI_voc_size_t maximalSize) override;
+  TRI_datafile_t* createCompactor(TRI_voc_fid_t fid, TRI_voc_size_t maximalSize);
   
   /// @brief close an existing compactor
-  int closeCompactor(TRI_datafile_t* datafile) override;
+  int closeCompactor(TRI_datafile_t* datafile);
 
   /// @brief replace a datafile with a compactor
-  int replaceDatafileWithCompactor(TRI_datafile_t* datafile, TRI_datafile_t* compactor) override;
+  int replaceDatafileWithCompactor(TRI_datafile_t* datafile, TRI_datafile_t* compactor);
 
-  bool removeCompactor(TRI_datafile_t*) override;
-  bool removeDatafile(TRI_datafile_t*) override;
+  bool removeCompactor(TRI_datafile_t*);
+  bool removeDatafile(TRI_datafile_t*);
   
   /// @brief seal a datafile
-  int sealDatafile(TRI_datafile_t* datafile, bool isCompactor) override;
-
-  /// @brief creates a datafile
-  TRI_datafile_t* createDatafile(TRI_voc_fid_t fid,
-                                 TRI_voc_size_t journalSize, 
-                                 bool isCompactor) override;
-
-  /// @brief closes the datafiles passed in the vector
-  bool closeDatafiles(std::vector<TRI_datafile_t*> const& files) override;
+  int sealDatafile(TRI_datafile_t* datafile, bool isCompactor);
 
   /// @brief iterates over a collection
   bool iterateDatafiles(std::function<bool(TRI_df_marker_t const*, TRI_datafile_t*)> const& cb) override;
+  
+  /// @brief increase dead stats for a datafile, if it exists
+  void increaseDeadStats(TRI_voc_fid_t fid, int64_t number, int64_t size) override {
+    _datafileStatistics.increaseDead(fid, number, size);
+  }
+  
+  /// @brief increase dead stats for a datafile, if it exists
+  void updateStats(TRI_voc_fid_t fid, DatafileStatisticsContainer const& values) override {
+    _datafileStatistics.update(fid, values);
+  }
+
+  /// @brief create statistics for a datafile, using the stats provided
+  void createStats(TRI_voc_fid_t fid, DatafileStatisticsContainer const& values) override {
+    _datafileStatistics.create(fid, values);
+  }
+
+  void preventCompaction() override;
+  bool tryPreventCompaction() override;
+  void allowCompaction() override;
+  void lockForCompaction() override;
+  bool tryLockForCompaction() override;
+  void finishCompaction() override;
+  
+  void open(bool ignoreErrors) override;
+  
+  Ditches* ditches() const override { return &_ditches; }
+
+ private:
+  /// @brief creates a datafile
+  TRI_datafile_t* createDatafile(TRI_voc_fid_t fid,
+                                 TRI_voc_size_t journalSize, 
+                                 bool isCompactor);
 
   /// @brief iterate over a vector of datafiles and pick those with a specific
   /// data range
-  std::vector<DatafileDescription> datafilesInRange(TRI_voc_tick_t dataMin, TRI_voc_tick_t dataMax) override;
+  std::vector<DatafileDescription> datafilesInRange(TRI_voc_tick_t dataMin, TRI_voc_tick_t dataMax);
   
- private:
+  /// @brief closes the datafiles passed in the vector
+  bool closeDatafiles(std::vector<TRI_datafile_t*> const& files);
+
   bool iterateDatafilesVector(std::vector<TRI_datafile_t*> const& files,
                               std::function<bool(TRI_df_marker_t const*, TRI_datafile_t*)> const& cb);
 
  private:
+  mutable arangodb::Ditches _ditches;
+
   arangodb::basics::ReadWriteLock _filesLock;
   std::vector<TRI_datafile_t*> _datafiles;   // all datafiles
   std::vector<TRI_datafile_t*> _journals;    // all journals
   std::vector<TRI_datafile_t*> _compactors;  // all compactor files
+  
+  arangodb::basics::ReadWriteLock _compactionLock;
+
+  int64_t _initialCount;
+  
+  MMFilesDatafileStatistics _datafileStatistics;
+
+  TRI_voc_rid_t _revision;
 };
 
 }

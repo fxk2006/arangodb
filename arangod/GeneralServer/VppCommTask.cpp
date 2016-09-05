@@ -163,10 +163,12 @@ VppCommTask::VppCommTask(EventLoop2 loop, GeneralServer* server,
     : Task2(loop, "VppCommTask"),
       GeneralCommTask(loop, server, sock, std::move(info), timeout) {
   _protocol = "vpp";
-  _readBuffer->reserve(
+  _readBuffer.reserve(
       _bufferLength);  // ATTENTION <- this is required so we do not
                        // loose information during a resize
                        // connectionStatisticsAgentSetVpp();
+  _agents.emplace(std::make_pair(0UL, RequestStatisticsAgent(true)));
+  getAgent(0UL)->acquire();
 }
 
 void VppCommTask::addResponse(VppResponse* response) {
@@ -175,32 +177,44 @@ void VppCommTask::addResponse(VppResponse* response) {
 
   std::vector<VPackSlice> slices;
   slices.push_back(response_message._header);
+  slices.push_back(response_message._payload);
 
-  VPackBuilder builder;
-  if (response_message._generateBody) {
-    builder = basics::VelocyPackHelper::sanitizeExternalsChecked(
-        response_message._payload);
-    slices.push_back(builder.slice());
+  LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                          << "created response:";
+  for (auto const& slice : slices) {
+    try {
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << slice.toJson();
+    } catch (arangodb::velocypack::Exception const& e) {
+    }
+    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "--";
   }
+  LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "response -- end";
 
   // FIXME (obi)
   // If the message is big we will create many small chunks in a loop.
   // For the first tests we just send single Messages
 
-  LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "got response:";
-  for (auto const& slice : slices) {
-    try {
-      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << slice.toJson();
-    } catch (arangodb::velocypack::Exception const& e) {
-      std::cout << e.what() << std::endl;
-    }
-  }
-
   // adds chunk header infromation and creates SingBuffer* that can be
   // used with _writeBuffers
   auto buffer = createChunkForNetworkSingle(slices, id);
 
-  addWriteBuffer(std::move(buffer));
+  double const totalTime = getAgent(id)->elapsedSinceReadStart();
+
+  addWriteBuffer(std::move(buffer), getAgent(id));
+
+  // and give some request information
+  LOG_TOPIC(INFO, Logger::REQUESTS)
+      << "\"vpp-request-end\",\"" << (void*)this << "\",\""
+      << _connectionInfo.clientAddress << "\",\""
+      << VppRequest::translateVersion(_protocolVersion) << "\","
+      << static_cast<int>(response->responseCode()) << ","
+      << "\"," << Logger::FIXED(totalTime, 6);
+
+  if (id) {
+    _agents.erase(id);
+  } else {
+    getAgent(0UL)->acquire();
+  }
 }
 
 VppCommTask::ChunkHeader VppCommTask::readChunkHeader() {
@@ -236,7 +250,7 @@ VppCommTask::ChunkHeader VppCommTask::readChunkHeader() {
 }
 
 bool VppCommTask::isChunkComplete(char* start) {
-  std::size_t length = std::distance(start, _readBuffer->end());
+  std::size_t length = std::distance(start, _readBuffer.end());
   auto& prv = _processReadVariables;
 
   if (!prv._currentChunkLength && length < sizeof(uint32_t)) {
@@ -256,13 +270,11 @@ bool VppCommTask::isChunkComplete(char* start) {
 
 // reads data from the socket
 bool VppCommTask::processRead() {
-  // TODO FIXME
-  // - in case of error send an operation failed to all incomplete messages /
-  //   operation and close connection (implement resetState/resetCommtask)
+  RequestStatisticsAgent agent(true);
 
   auto& prv = _processReadVariables;
   if (!prv._readBufferCursor) {
-    prv._readBufferCursor = _readBuffer->begin();
+    prv._readBufferCursor = _readBuffer.begin();
   }
 
   auto chunkBegin = prv._readBufferCursor;
@@ -279,7 +291,15 @@ bool VppCommTask::processRead() {
 
   // CASE 1: message is in one chunk
   if (chunkHeader._isFirst && chunkHeader._chunk == 1) {
-    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "chunk contains single message";
+    _agents.emplace(
+        std::make_pair(chunkHeader._messageID, RequestStatisticsAgent(true)));
+
+    auto agent = getAgent(chunkHeader._messageID);
+    agent->acquire();
+    agent->requestStatisticsAgentSetReadStart();
+
+    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                            << "chunk contains single message";
     std::size_t payloads = 0;
 
     try {
@@ -288,12 +308,15 @@ bool VppCommTask::processRead() {
       handleSimpleError(rest::ResponseCode::BAD,
                         TRI_ERROR_ARANGO_DATABASE_NOT_FOUND, e.what(),
                         chunkHeader._messageID);
-      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VPack Validation failed!";
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                              << "VPack Validation failed!"
+                                              << e.what();
       closeTask(rest::ResponseCode::BAD);
       return false;
     } catch (...) {
       handleSimpleError(rest::ResponseCode::BAD, chunkHeader._messageID);
-      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VPack Validation failed!";
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                              << "VPack Validation failed!";
       closeTask(rest::ResponseCode::BAD);
       return false;
     }
@@ -308,15 +331,25 @@ bool VppCommTask::processRead() {
     // }
 
     doExecute = true;
+    getAgent(chunkHeader._messageID)->requestStatisticsAgentSetReadEnd();
   }
   // CASE 2:  message is in multiple chunks
   auto incompleteMessageItr = _incompleteMessages.find(chunkHeader._messageID);
 
   // CASE 2a: chunk starts new message
   if (chunkHeader._isFirst) {  // first chunk of multi chunk message
-    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "chunk starts a new message";
+    _agents.emplace(
+        std::make_pair(chunkHeader._messageID, RequestStatisticsAgent(true)));
+
+    auto agent = getAgent(chunkHeader._messageID);
+    agent->acquire();
+    agent->requestStatisticsAgentSetReadStart();
+
+    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                            << "chunk starts a new message";
     if (incompleteMessageItr != _incompleteMessages.end()) {
       LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+          << "VppCommTask: "
           << "Message should be first but is already in the Map of incomplete "
              "messages";
       closeTask(rest::ResponseCode::BAD);
@@ -331,16 +364,19 @@ bool VppCommTask::processRead() {
     auto insertPair = _incompleteMessages.emplace(
         std::make_pair(chunkHeader._messageID, std::move(message)));
     if (!insertPair.second) {
-      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "insert failed";
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                              << "insert failed";
       closeTask(rest::ResponseCode::BAD);
       return false;
     }
 
     // CASE 2b: chunk continues a message
   } else {  // followup chunk of some mesage
-    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "chunk continues a message";
+    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                            << "chunk continues a message";
     if (incompleteMessageItr == _incompleteMessages.end()) {
       LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+          << "VppCommTask: "
           << "found message without previous part";
       closeTask(rest::ResponseCode::BAD);
       return false;
@@ -353,7 +389,8 @@ bool VppCommTask::processRead() {
 
     // MESSAGE COMPLETE
     if (im._currentChunk == im._numberOfChunks - 1 /* zero based counting */) {
-      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "chunk completes a message";
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                              << "chunk completes a message";
       std::size_t payloads = 0;
 
       try {
@@ -366,12 +403,15 @@ bool VppCommTask::processRead() {
         handleSimpleError(rest::ResponseCode::BAD,
                           TRI_ERROR_ARANGO_DATABASE_NOT_FOUND, e.what(),
                           chunkHeader._messageID);
-        LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VPack Validation failed!";
+        LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                                << "VPack Validation failed!"
+                                                << e.what();
         closeTask(rest::ResponseCode::BAD);
         return false;
       } catch (...) {
         handleSimpleError(rest::ResponseCode::BAD, chunkHeader._messageID);
-        LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VPack Validation failed!";
+        LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "VppCommTask: "
+                                                << "VPack Validation failed!";
         closeTask(rest::ResponseCode::BAD);
         return false;
       }
@@ -381,8 +421,10 @@ bool VppCommTask::processRead() {
       // check length
 
       doExecute = true;
+      getAgent(chunkHeader._messageID)->requestStatisticsAgentSetReadEnd();
     }
     LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+        << "VppCommTask: "
         << "chunk does not complete a message";
   }
 
@@ -391,24 +433,32 @@ bool VppCommTask::processRead() {
       0;  // if we end up here we have read a complete chunk
   prv._readBufferCursor = chunkEnd;
   std::size_t processedDataLen =
-      std::distance(_readBuffer->begin(), prv._readBufferCursor);
+      std::distance(_readBuffer.begin(), prv._readBufferCursor);
   // clean buffer up to length of chunk
   if (processedDataLen > prv._cleanupLength) {
-    _readBuffer->move_front(processedDataLen);
+    _readBuffer.move_front(processedDataLen);
     prv._readBufferCursor = nullptr;  // the positon will be set at the
                                       // begin of this function
   }
 
   if (doExecute) {
     VPackSlice header = message.header();
-    LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "got request:"
-                                            << header.toJson();
+
+    LOG_TOPIC(DEBUG, Logger::REQUESTS) << "\"vpp-request-header\",\""
+                                       << "\"," << message.header().toJson()
+                                       << "\"";
+
+    LOG_TOPIC(DEBUG, Logger::REQUESTS) << "\"vpp-request-payload\",\""
+                                       << "\"," << message.payload().toJson()
+                                       << "\"";
+
     int type = meta::underlyingValue(rest::RequestType::ILLEGAL);
     try {
       type = header.at(1).getInt();
     } catch (std::exception const& e) {
       handleSimpleError(rest::ResponseCode::BAD, chunkHeader._messageID);
       LOG_TOPIC(DEBUG, Logger::COMMUNICATION)
+          << "VppCommTask: "
           << std::string("VPack Validation failed!") + e.what();
       closeTask(rest::ResponseCode::BAD);
       return false;
@@ -439,7 +489,7 @@ bool VppCommTask::processRead() {
   }
 
   if (read_maybe_only_part_of_buffer) {
-    if (prv._readBufferCursor == _readBuffer->end()) {
+    if (prv._readBufferCursor == _readBuffer.end()) {
       return false;
     }
     return true;
@@ -450,7 +500,7 @@ bool VppCommTask::processRead() {
 void VppCommTask::closeTask(rest::ResponseCode code) {
   _processReadVariables._readBufferCursor = nullptr;
   _processReadVariables._currentChunkLength = 0;
-  _readBuffer->clear();  // check is this changes the reserved size
+  _readBuffer.clear();  // check is this changes the reserved size
 
   // is there a case where we do not want to close the connection
   for (auto const& message : _incompleteMessages) {

@@ -23,13 +23,14 @@
 
 #include "replication-dump.h"
 #include "Basics/ReadLocker.h"
+#include "Basics/StaticStrings.h"
 #include "Basics/VPackStringBufferAdapter.h"
 #include "Logger/Logger.h"
-#include "VocBase/collection.h"
+#include "VocBase/CompactionLocker.h"
 #include "VocBase/DatafileHelper.h"
-#include "VocBase/datafile.h"
-#include "VocBase/collection.h"
+#include "VocBase/Ditch.h"
 #include "VocBase/LogicalCollection.h"
+#include "VocBase/datafile.h"
 #include "VocBase/vocbase.h"
 #include "Wal/Logfile.h"
 #include "Wal/LogfileManager.h"
@@ -394,7 +395,7 @@ static int DumpCollection(TRI_replication_dump_t* dump,
                           bool withTicks) {
   LOG(TRACE) << "dumping collection " << collection->cid() << ", tick range " << dataMin << " - " << dataMax;
 
-  bool const isEdgeCollection = (collection->_collection->_info.type() == TRI_COL_TYPE_EDGE);
+  bool const isEdgeCollection = (collection->type() == TRI_COL_TYPE_EDGE);
 
   // setup some iteration state
   TRI_voc_tick_t lastFoundTick = 0;
@@ -447,21 +448,17 @@ static int DumpCollection(TRI_replication_dump_t* dump,
 ////////////////////////////////////////////////////////////////////////////////
 
 int TRI_DumpCollectionReplication(TRI_replication_dump_t* dump,
-                                  arangodb::LogicalCollection* col,
+                                  arangodb::LogicalCollection* collection,
                                   TRI_voc_tick_t dataMin,
                                   TRI_voc_tick_t dataMax, bool withTicks) {
-  TRI_ASSERT(col != nullptr);
-  TRI_ASSERT(col->_collection != nullptr);
+  TRI_ASSERT(collection != nullptr);
   
   // get a custom type handler
   auto customTypeHandler = dump->_transactionContext->orderCustomTypeHandler();
   dump->_vpackOptions.customTypeHandler = customTypeHandler.get();
 
-  TRI_collection_t* document = col->_collection;
-  TRI_ASSERT(document != nullptr);
-
   // create a barrier so the underlying collection is not unloaded
-  auto b = document->ditches()->createReplicationDitch(__FILE__, __LINE__);
+  auto b = collection->ditches()->createReplicationDitch(__FILE__, __LINE__);
 
   if (b == nullptr) {
     return TRI_ERROR_OUT_OF_MEMORY;
@@ -470,17 +467,17 @@ int TRI_DumpCollectionReplication(TRI_replication_dump_t* dump,
   // block compaction
   int res;
   {
-    READ_LOCKER(locker, document->_compactionLock);
+    CompactionPreventer compactionPreventer(collection);
 
     try {
-      res = DumpCollection(dump, col, document->_vocbase->id(), document->_info.id(), dataMin, dataMax, withTicks);
+      res = DumpCollection(dump, collection, collection->vocbase()->id(), collection->cid(), dataMin, dataMax, withTicks);
     } catch (...) {
       res = TRI_ERROR_INTERNAL;
     }
   }
 
   // always execute this
-  document->ditches()->freeDitch(b);
+  collection->ditches()->freeDitch(b);
 
   return res;
 }

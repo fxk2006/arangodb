@@ -29,7 +29,6 @@
 #include "Rest/HttpRequest.h"
 #include "Utils/SingleCollectionTransaction.h"
 #include "Utils/StandaloneTransactionContext.h"
-#include "VocBase/collection.h"
 #include "VocBase/vocbase.h"
 
 using namespace arangodb;
@@ -542,6 +541,12 @@ bool RestDocumentHandler::deleteDocument() {
       return false;
     }
     search = builderPtr->slice();
+  }
+
+  if (!search.isArray() && !search.isObject()) {
+    generateError(rest::ResponseCode::BAD,
+                  TRI_ERROR_HTTP_BAD_PARAMETER, "Request body not parseable");
+    return false;
   }
 
   SingleCollectionTransaction trx(transactionContext, collectionName,

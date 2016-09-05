@@ -25,6 +25,7 @@
 
 #ifdef _WIN32
 #include <tchar.h>
+#include <Shlwapi.h>
 #endif
 
 #include "Basics/directories.h"
@@ -375,32 +376,32 @@ bool TRI_IsSymbolicLink(char const* path) {
 bool TRI_ExistsFile(char const* path) {
   if (path == nullptr) {
     return false;
-  } else {
-    TRI_stat_t stbuf;
-    size_t len;
-    int res;
+  }
 
-    len = strlen(path);
+  TRI_stat_t stbuf;
+  size_t len;
+  int res;
 
-    // path must not end with a \ on Windows, other stat() will return -1
-    if (len > 0 && path[len - 1] == TRI_DIR_SEPARATOR_CHAR) {
-      char* copy = TRI_DuplicateString(TRI_CORE_MEM_ZONE, path);
+  len = strlen(path);
 
-      if (copy == nullptr) {
-        return false;
-      }
+  // path must not end with a \ on Windows, other stat() will return -1
+  if (len > 0 && path[len - 1] == TRI_DIR_SEPARATOR_CHAR) {
+    char* copy = TRI_DuplicateString(TRI_CORE_MEM_ZONE, path);
 
-      // remove trailing slash
-      RemoveTrailingSeparator(copy);
-
-      res = TRI_STAT(copy, &stbuf);
-      TRI_FreeString(TRI_CORE_MEM_ZONE, copy);
-    } else {
-      res = TRI_STAT(path, &stbuf);
+    if (copy == nullptr) {
+      return false;
     }
 
-    return res == 0;
+    // remove trailing slash
+    RemoveTrailingSeparator(copy);
+
+    res = TRI_STAT(copy, &stbuf);
+    TRI_FreeString(TRI_CORE_MEM_ZONE, copy);
+  } else {
+    res = TRI_STAT(path, &stbuf);
   }
+
+  return res == 0;
 }
 
 #else
@@ -1603,9 +1604,6 @@ std::string TRI_BinaryName(char const* argv0) {
 ////////////////////////////////////////////////////////////////////////////////
 
 std::string TRI_LocateBinaryPath(char const* argv0) {
-  char const* p;
-  char* binaryPath = nullptr;
-
 #if _WIN32
 
   if (argv0 == nullptr) {
@@ -1633,9 +1631,11 @@ std::string TRI_LocateBinaryPath(char const* argv0) {
   }
 
 #endif
+  
+  std::string binaryPath;
 
   // check if name contains a '/' ( or '\' for windows)
-  p = argv0;
+  char const* p = argv0;
 
   for (; *p && *p != TRI_DIR_SEPARATOR_CHAR; ++p) {
   }
@@ -1644,12 +1644,9 @@ std::string TRI_LocateBinaryPath(char const* argv0) {
   if (*p) {
     char* dir = TRI_Dirname(argv0);
 
-    if (dir == nullptr) {
-      binaryPath = TRI_DuplicateString("");
-      TRI_FreeString(TRI_CORE_MEM_ZONE, dir);
-    }
-    else {
+    if (dir != nullptr) {
       binaryPath = dir;
+      TRI_FreeString(TRI_CORE_MEM_ZONE, dir);
     }
   }
 
@@ -1675,7 +1672,7 @@ std::string TRI_LocateBinaryPath(char const* argv0) {
 
         if (TRI_ExistsFile(full)) {
           TRI_FreeString(TRI_CORE_MEM_ZONE, full);
-          binaryPath = TRI_DuplicateString(files._buffer[i]);
+          binaryPath = files._buffer[i];
           break;
         }
 
@@ -1686,37 +1683,31 @@ std::string TRI_LocateBinaryPath(char const* argv0) {
     }
   }
 
-  std::string result = (binaryPath == nullptr) ? "" : binaryPath;
-
-  if (binaryPath != nullptr) {
-    TRI_FreeString(TRI_CORE_MEM_ZONE, binaryPath);
-  }
-
-  return result;
+  return binaryPath;
 }
 
 std::string TRI_GetInstallRoot(std::string const& binaryPath,
-                               char const *installBinaryPath) {
+                               char const* installBinaryPath) {
   // First lets remove trailing (back) slashes from the bill:
-  long ibpLength = strlen(installBinaryPath);
+  size_t ibpLength = strlen(installBinaryPath);
 
   if (installBinaryPath[ibpLength - 1] == TRI_DIR_SEPARATOR_CHAR) {
     ibpLength --;
   }
   
-  long bpLength = binaryPath.length();
-  const char *pbPath = binaryPath.c_str();
+  size_t bpLength = binaryPath.length();
+  char const* pbPath = binaryPath.c_str();
 
   if (pbPath[bpLength - 1] == TRI_DIR_SEPARATOR_CHAR) {
-    bpLength --;
+    --bpLength;
   }
   
   if (ibpLength > bpLength) {
     return TRI_DIR_SEPARATOR_STR;
   }
 
-  for (int i = 1; i < ibpLength; i ++) {
-    if (pbPath[bpLength -i] != installBinaryPath[ibpLength - i]) {
+  for (size_t i = 1; i < ibpLength; ++i) {
+    if (pbPath[bpLength - i] != installBinaryPath[ibpLength - i]) {
       return TRI_DIR_SEPARATOR_STR;
     }
   }
@@ -2422,3 +2413,16 @@ void TRI_InitializeFiles() {
 ////////////////////////////////////////////////////////////////////////////////
 
 void TRI_ShutdownFiles() {}
+
+
+
+#if _WIN32
+bool TRI_PathIsAbsolute(const std::string &path) {
+  return !PathIsRelative(path.c_str());
+}
+
+#else  
+bool TRI_PathIsAbsolute(const std::string &path) {
+  return path.c_str()[0] == '/';
+}
+#endif

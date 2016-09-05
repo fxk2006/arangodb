@@ -180,7 +180,7 @@ bool config_t::activePushBack(std::string const& id) {
 
 
 std::vector<std::string> config_t::gossipPeers() const {
-  
+
   READ_LOCKER(readLocker, _lock);
   return _gossipPeers;
 }
@@ -195,7 +195,7 @@ void config_t::eraseFromGossipPeers(std::string const& endpoint) {
 
 
 bool config_t::addToPool(std::pair<std::string,std::string> const& i) {
-  WRITE_LOCKER(readLocker, _lock);  
+  WRITE_LOCKER(readLocker, _lock);
   if (_pool.find(i.first) == _pool.end()) {
     _pool[i.first] = i.second;
   } else {
@@ -237,6 +237,19 @@ query_t config_t::activeToBuilder () const {
     READ_LOCKER(readLocker, _lock);
     for (auto const& i : _active) {
       ret->add(VPackValue(i));
+    }
+  }
+  ret->close();
+  return ret;
+}
+
+query_t config_t::activeAgentsToBuilder () const {
+  query_t ret = std::make_shared<arangodb::velocypack::Builder>();
+  ret->openObject();
+  {
+    READ_LOCKER(readLocker, _lock);
+    for (auto const& i : _active) {
+      ret->add(i, VPackValue(_pool.at(i)));
     }
   }
   ret->close();
@@ -287,14 +300,14 @@ void config_t::override(VPackSlice const& conf) {
     LOG_TOPIC(ERR, Logger::AGENCY)
       << "Failed to override " << agencySizeStr << " from " << conf.toJson();
   }
-    
+
   if (conf.hasKey(poolSizeStr) && conf.get(poolSizeStr).isUInt()) {
     _poolSize = conf.get(poolSizeStr).getUInt();
   } else {
     LOG_TOPIC(ERR, Logger::AGENCY)
       << "Failed to override " << poolSizeStr << " from " << conf.toJson();
   }
-    
+
   if (conf.hasKey(minPingStr) && conf.get(minPingStr).isDouble()) {
     _minPing = conf.get(minPingStr).getDouble();
   } else {
@@ -313,7 +326,7 @@ void config_t::override(VPackSlice const& conf) {
     _pool.clear();
     for (auto const& peer : VPackArrayIterator(conf.get(poolStr))) {
       auto key = peer.get(idStr).copyString();
-      auto value = peer.get(endpointStr).copyString(); 
+      auto value = peer.get(endpointStr).copyString();
       _pool[key] = value;
     }
   } else {
@@ -365,7 +378,7 @@ void config_t::override(VPackSlice const& conf) {
 
 }
 
-  
+
 /// @brief vpack representation
 query_t config_t::toBuilder() const {
   query_t ret = std::make_shared<arangodb::velocypack::Builder>();
@@ -409,8 +422,8 @@ bool config_t::setId(std::string const& i) {
 
 
 /// @brief merge from persisted configuration
-bool config_t::merge(VPackSlice const& conf) { 
-  
+bool config_t::merge(VPackSlice const& conf) {
+
   WRITE_LOCKER(writeLocker, _lock); // All must happen under the lock or else ...
 
   _id = conf.get(idStr).copyString(); // I get my id
@@ -476,7 +489,7 @@ bool config_t::merge(VPackSlice const& conf) {
   ss << "Min RAFT interval: ";
   if (_minPing == 0) { // Command line beats persistence
     if (conf.hasKey(minPingStr)) {
-      _minPing = conf.get(minPingStr).getNumericValue<double>();
+      _minPing = conf.get(minPingStr).getDouble();
       ss << _minPing << " (persisted)";
     } else {
       _minPing = 0.5;
@@ -491,7 +504,7 @@ bool config_t::merge(VPackSlice const& conf) {
   ss << "Max RAFT interval: ";
   if (_maxPing == 0) { // Command line beats persistence
     if (conf.hasKey(maxPingStr)) {
-      _maxPing = conf.get(maxPingStr).getNumericValue<double>();
+      _maxPing = conf.get(maxPingStr).getDouble();
       ss << _maxPing << " (persisted)";
     } else {
       _maxPing = 2.5;
@@ -548,6 +561,6 @@ bool config_t::merge(VPackSlice const& conf) {
   LOG_TOPIC(DEBUG, Logger::AGENCY) << ss.str();
 
   return true;
-    
+
 }
-  
+

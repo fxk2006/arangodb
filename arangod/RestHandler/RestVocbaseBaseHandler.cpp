@@ -34,7 +34,6 @@
 #include "Rest/HttpRequest.h"
 #include "Utils/StandaloneTransactionContext.h"
 #include "Utils/Transaction.h"
-#include "VocBase/collection.h"
 
 #include <velocypack/Builder.h>
 #include <velocypack/Dumper.h>
@@ -169,9 +168,9 @@ void RestVocbaseBaseHandler::generateSaved(
     arangodb::OperationResult const& result, std::string const& collectionName,
     TRI_col_type_e type, VPackOptions const* options, bool isMultiple) {
   if (result.wasSynchronous) {
-    setResponseCode(rest::ResponseCode::CREATED);
+    resetResponse(rest::ResponseCode::CREATED);
   } else {
-    setResponseCode(rest::ResponseCode::ACCEPTED);
+    resetResponse(rest::ResponseCode::ACCEPTED);
   }
 
   if (isMultiple && !result.countErrorCodes.empty()) {
@@ -196,9 +195,9 @@ void RestVocbaseBaseHandler::generateDeleted(
     arangodb::OperationResult const& result, std::string const& collectionName,
     TRI_col_type_e type, VPackOptions const* options) {
   if (result.wasSynchronous) {
-    setResponseCode(rest::ResponseCode::OK);
+    resetResponse(rest::ResponseCode::OK);
   } else {
-    setResponseCode(rest::ResponseCode::ACCEPTED);
+    resetResponse(rest::ResponseCode::ACCEPTED);
   }
   generate20x(result, collectionName, type, options);
 }
@@ -257,7 +256,7 @@ void RestVocbaseBaseHandler::generateForbidden() {
 
 void RestVocbaseBaseHandler::generatePreconditionFailed(
     VPackSlice const& slice) {
-  setResponseCode(rest::ResponseCode::PRECONDITION_FAILED);
+  resetResponse(rest::ResponseCode::PRECONDITION_FAILED);
 
   if (slice.isObject()) {  // single document case
     std::string const rev =
@@ -310,7 +309,7 @@ void RestVocbaseBaseHandler::generatePreconditionFailed(
 ////////////////////////////////////////////////////////////////////////////////
 
 void RestVocbaseBaseHandler::generateNotModified(TRI_voc_rid_t rid) {
-  setResponseCode(rest::ResponseCode::NOT_MODIFIED);
+  resetResponse(rest::ResponseCode::NOT_MODIFIED);
   _response->setHeaderNC(StaticStrings::Etag,
                          "\"" + TRI_RidToString(rid) + "\"");
 }
@@ -331,7 +330,7 @@ void RestVocbaseBaseHandler::generateDocument(VPackSlice const& input,
   }
 
   // and generate a response
-  setResponseCode(rest::ResponseCode::OK);
+  resetResponse(rest::ResponseCode::OK);
 
   // set ETAG header
   if (!rev.empty()) {

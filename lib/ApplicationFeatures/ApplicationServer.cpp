@@ -166,6 +166,11 @@ void ApplicationServer::run(int argc, char* argv[]) {
   // file(s)
   parseOptions(argc, argv);
 
+  if (!_helpSection.empty()) {
+    // help shown. we can exit early
+    return;
+  }
+
   // seal the options
   _options->seal();
 
@@ -285,17 +290,17 @@ void ApplicationServer::collectOptions() {
 void ApplicationServer::parseOptions(int argc, char* argv[]) {
   ArgumentParser parser(_options.get());
 
-  std::string helpSection = parser.helpSection(argc, argv);
+  _helpSection = parser.helpSection(argc, argv);
 
-  if (!helpSection.empty()) {
+  if (!_helpSection.empty()) {
     // user asked for "--help"
 
     // translate "all" to "*"
-    if (helpSection == "all") {
-      helpSection = "*";
+    if (_helpSection == "all") {
+      _helpSection = "*";
     }
-    _options->printHelp(helpSection);
-    exit(EXIT_SUCCESS);
+    _options->printHelp(_helpSection);
+    return;
   }
 
   if (!parser.parse(argc, argv)) {
@@ -488,16 +493,16 @@ void ApplicationServer::prepare() {
         feature->prepare();
         feature->state(FeatureState::PREPARED);
       } catch (std::exception const& ex) {
-        LOG(ERR) << "caught exception during prepare of feature "
-                 << feature->name() << ": " << ex.what();
+        LOG(ERR) << "caught exception during prepare of feature '"
+                 << feature->name() << "': " << ex.what();
         // restore original privileges
         if (!privilegesElevated) {
           raisePrivilegesTemporarily();
         }
         throw;
       } catch (...) {
-        LOG(ERR) << "caught unknown exception during prepare of feature "
-                 << feature->name();
+        LOG(ERR) << "caught unknown exception during preparation of feature '"
+                 << feature->name() << "'";
         // restore original privileges
         if (!privilegesElevated) {
           raisePrivilegesTemporarily();
@@ -523,12 +528,12 @@ void ApplicationServer::start() {
       feature->state(FeatureState::STARTED);
       reportFeatureProgress(_state, feature->name());
     } catch (std::exception const& ex) {
-      LOG(ERR) << "caught exception during start of feature " << feature->name()
-               << ": " << ex.what() << ". shutting down";
+      LOG(ERR) << "caught exception during start of feature '" << feature->name()
+               << "': " << ex.what() << ". shutting down";
       abortStartup = true;
     } catch (...) {
-      LOG(ERR) << "caught unknown exception during start of feature "
-               << feature->name() << ". shutting down";
+      LOG(ERR) << "caught unknown exception during start of feature '"
+               << feature->name() << "'. shutting down";
       abortStartup = true;
     }
 
@@ -538,9 +543,23 @@ void ApplicationServer::start() {
            ++it) {
         auto feature = *it;
         if (feature->state() == FeatureState::STARTED) {
-          LOG(TRACE) << "forcefully stopping feature " << feature->name();
+          LOG(TRACE) << "forcefully stopping feature '" << feature->name() << "'";
           try {
             feature->stop();
+          } catch (...) {
+            // ignore errors on shutdown
+          }
+        }
+      }
+      
+      // try to unprepare all feature that we just started
+      for (auto it = _orderedFeatures.rbegin(); it != _orderedFeatures.rend();
+           ++it) {
+        auto feature = *it;
+        if (feature->state() == FeatureState::STOPPED) {
+          LOG(TRACE) << "forcefully unpreparing feature '" << feature->name() << "'";
+          try {
+            feature->unprepare();
           } catch (...) {
             // ignore errors on shutdown
           }

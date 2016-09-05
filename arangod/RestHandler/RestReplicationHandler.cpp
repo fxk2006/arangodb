@@ -607,7 +607,7 @@ void RestReplicationHandler::handleCommandBatch() {
     int res = engine->extendCompactionBlocker(_vocbase, id, expires);
 
     if (res == TRI_ERROR_NO_ERROR) {
-      setResponseCode(rest::ResponseCode::NO_CONTENT);
+      resetResponse(rest::ResponseCode::NO_CONTENT);
     } else {
       generateError(GeneralResponse::responseCode(res), res);
     }
@@ -623,7 +623,7 @@ void RestReplicationHandler::handleCommandBatch() {
     int res = engine->removeCompactionBlocker(_vocbase, id);
 
     if (res == TRI_ERROR_NO_ERROR) {
-      setResponseCode(rest::ResponseCode::NO_CONTENT);
+      resetResponse(rest::ResponseCode::NO_CONTENT);
     } else {
       generateError(GeneralResponse::responseCode(res), res);
     }
@@ -724,7 +724,7 @@ void RestReplicationHandler::handleCommandBarrier() {
 
     if (arangodb::wal::LogfileManager::instance()->extendLogfileBarrier(
             id, ttl, minTick)) {
-      setResponseCode(rest::ResponseCode::NO_CONTENT);
+      resetResponse(rest::ResponseCode::NO_CONTENT);
     } else {
       int res = TRI_ERROR_ARANGO_DOCUMENT_NOT_FOUND;
       generateError(GeneralResponse::responseCode(res), res);
@@ -737,7 +737,7 @@ void RestReplicationHandler::handleCommandBarrier() {
     TRI_voc_tick_t id = StringUtils::uint64(suffix[1]);
 
     if (arangodb::wal::LogfileManager::instance()->removeLogfileBarrier(id)) {
-      setResponseCode(rest::ResponseCode::NO_CONTENT);
+      resetResponse(rest::ResponseCode::NO_CONTENT);
     } else {
       int res = TRI_ERROR_ARANGO_DOCUMENT_NOT_FOUND;
       generateError(GeneralResponse::responseCode(res), res);
@@ -845,7 +845,7 @@ void RestReplicationHandler::handleTrampolineCoordinator() {
   }
 
   bool dummy;
-  setResponseCode(static_cast<rest::ResponseCode>(
+  resetResponse(static_cast<rest::ResponseCode>(
       res->result->getHttpReturnCode()));
 
   HttpResponse* httpResponse = dynamic_cast<HttpResponse*>(_response.get());
@@ -997,9 +997,9 @@ void RestReplicationHandler::handleCommandLoggerFollow() {
       size_t const length = TRI_LengthStringBuffer(dump._buffer);
 
       if (length == 0) {
-        setResponseCode(rest::ResponseCode::NO_CONTENT);
+        resetResponse(rest::ResponseCode::NO_CONTENT);
       } else {
-        setResponseCode(rest::ResponseCode::OK);
+        resetResponse(rest::ResponseCode::OK);
       }
 
       HttpResponse* httpResponse = dynamic_cast<HttpResponse*>(_response.get());
@@ -1099,9 +1099,9 @@ void RestReplicationHandler::handleCommandDetermineOpenTransactions() {
       size_t const length = TRI_LengthStringBuffer(dump._buffer);
 
       if (length == 0) {
-        setResponseCode(rest::ResponseCode::NO_CONTENT);
+        resetResponse(rest::ResponseCode::NO_CONTENT);
       } else {
-        setResponseCode(rest::ResponseCode::OK);
+        resetResponse(rest::ResponseCode::OK);
       }
 
       HttpResponse* httpResponse = dynamic_cast<HttpResponse*>(_response.get());
@@ -1256,23 +1256,6 @@ void RestReplicationHandler::handleCommandClusterInventory() {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief extract the collection id from VelocyPack TODO: MOVE
-////////////////////////////////////////////////////////////////////////////////
-
-TRI_voc_cid_t RestReplicationHandler::getCid(VPackSlice const& slice) const {
-  if (!slice.isObject()) {
-    return 0;
-  }
-  VPackSlice const id = slice.get("cid");
-  if (id.isString()) {
-    return StringUtils::uint64(id.copyString());
-  } else if (id.isNumber()) {
-    return static_cast<TRI_voc_cid_t>(id.getNumericValue<uint64_t>());
-  }
-  return 0;
-}
-
-////////////////////////////////////////////////////////////////////////////////
 /// @brief creates a collection, based on the VelocyPack provided TODO: MOVE
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1297,7 +1280,7 @@ int RestReplicationHandler::createCollection(VPackSlice const& slice,
   TRI_voc_cid_t cid = 0;
 
   if (reuseId) {
-    cid = getCid(slice);
+    cid = arangodb::basics::VelocyPackHelper::extractIdValue(slice);
 
     if (cid == 0) {
       return TRI_ERROR_HTTP_BAD_PARAMETER;
@@ -1319,24 +1302,39 @@ int RestReplicationHandler::createCollection(VPackSlice const& slice,
     return TRI_ERROR_NO_ERROR;
   }
 
-  VocbaseCollectionInfo params(_vocbase, name.c_str(), slice, true);
+  int res = TRI_ERROR_NO_ERROR;
+  try {
+    col = _vocbase->createCollection(slice, cid, true);
+  } catch (basics::Exception const& ex) {
+    res = ex.code();
+  } catch (...) {
+    res = TRI_ERROR_INTERNAL;
+  }
+
+  if (res != TRI_ERROR_NO_ERROR) {
+    return res;
+  }
+
+  TRI_ASSERT(col != nullptr);
+
   /* Temporary ASSERTS to prove correctness of new constructor */
-  TRI_ASSERT(params.doCompact() ==
+  TRI_ASSERT(col->doCompact() ==
              arangodb::basics::VelocyPackHelper::getBooleanValue(
                  slice, "doCompact", true));
   TRI_ASSERT(
-      params.waitForSync() ==
+      col->waitForSync() ==
       arangodb::basics::VelocyPackHelper::getBooleanValue(
           slice, "waitForSync",
           application_features::ApplicationServer::getFeature<DatabaseFeature>(
               "Database")->waitForSync()));
-  TRI_ASSERT(params.isVolatile() ==
+  TRI_ASSERT(col->isVolatile() ==
              arangodb::basics::VelocyPackHelper::getBooleanValue(
                  slice, "isVolatile", false));
-  TRI_ASSERT(params.isSystem() == (name[0] == '_'));
-  TRI_ASSERT(params.indexBuckets() ==
+  TRI_ASSERT(col->isSystem() == (name[0] == '_'));
+  TRI_ASSERT(col->indexBuckets() ==
              arangodb::basics::VelocyPackHelper::getNumericValue<uint32_t>(
-                 slice, "indexBuckets", DatabaseFeature::DefaultIndexBuckets));
+                 slice, "indexBuckets", DatabaseFeature::defaultIndexBuckets()));
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
   TRI_voc_cid_t planId = 0;
   VPackSlice const planIdSlice = slice.get("planId");
   if (planIdSlice.isNumber()) {
@@ -1345,19 +1343,13 @@ int RestReplicationHandler::createCollection(VPackSlice const& slice,
   } else if (planIdSlice.isString()) {
     std::string tmp = planIdSlice.copyString();
     planId = static_cast<TRI_voc_cid_t>(StringUtils::uint64(tmp));
+  } else if (planIdSlice.isNone()) {
+    // There is no plan ID it has to be equal to collection id
+    planId = col->cid();
   }
 
-  if (planId > 0) {
-    TRI_ASSERT(params.planId() == planId);
-  } else {
-    TRI_ASSERT(params.planId() == 0);
-  }
-
-  col = _vocbase->createCollection(params, cid, true);
-
-  if (col == nullptr) {
-    return TRI_errno();
-  }
+  TRI_ASSERT(col->planId() == planId);
+#endif
 
   if (dst != nullptr) {
     *dst = col;
@@ -1548,17 +1540,13 @@ int RestReplicationHandler::processRestoreCollection(
   arangodb::LogicalCollection* col = nullptr;
 
   if (reuseId) {
-    VPackSlice const idString = parameters.get("cid");
+    TRI_voc_cid_t const cid = arangodb::basics::VelocyPackHelper::extractIdValue(parameters);
 
-    if (!idString.isString()) {
+    if (cid == 0) {
       errorMsg = "collection id is missing";
 
       return TRI_ERROR_HTTP_BAD_PARAMETER;
     }
-
-    std::string tmp = idString.copyString();
-
-    TRI_voc_cid_t cid = StringUtils::uint64(tmp.c_str(), tmp.length());
 
     // first look up the collection by the cid
     col = _vocbase->lookupCollection(cid);
@@ -1572,7 +1560,7 @@ int RestReplicationHandler::processRestoreCollection(
   // drop an existing collection if it exists
   if (col != nullptr) {
     if (dropExisting) {
-      int res = _vocbase->dropCollection(col, true);
+      int res = _vocbase->dropCollection(col, true, true);
 
       if (res == TRI_ERROR_FORBIDDEN) {
         // some collections must not be dropped
@@ -1665,12 +1653,13 @@ int RestReplicationHandler::processRestoreCollectionCoordinator(
 
   std::string dbName = _vocbase->name();
 
-  // in a cluster, we only look up by name:
   ClusterInfo* ci = ClusterInfo::instance();
-  std::shared_ptr<LogicalCollection> col = ci->getCollection(dbName, name);
 
-  // drop an existing collection if it exists
-  if (col != nullptr) {
+  try {
+    // in a cluster, we only look up by name:
+    std::shared_ptr<LogicalCollection> col = ci->getCollection(dbName, name);
+
+    // drop an existing collection if it exists
     if (dropExisting) {
       int res = ci->dropCollectionCoordinator(dbName, col->cid_as_string(),
                                               errorMsg, 0.0);
@@ -1698,6 +1687,7 @@ int RestReplicationHandler::processRestoreCollectionCoordinator(
 
       return res;
     }
+  } catch (...) {
   }
 
   // now re-create the collection
@@ -1776,7 +1766,7 @@ int RestReplicationHandler::processRestoreCollectionCoordinator(
 
     // create a dummy primary index
     {
-      TRI_collection_t* doc = nullptr;
+      arangodb::LogicalCollection* doc = nullptr;
       std::unique_ptr<arangodb::PrimaryIndex> primaryIndex(
           new arangodb::PrimaryIndex(doc));
       toMerge.openObject();
@@ -1883,10 +1873,10 @@ int RestReplicationHandler::processRestoreIndexes(VPackSlice const& collection,
   try {
     CollectionGuard guard(_vocbase, name.c_str());
 
-    TRI_collection_t* document = guard.collection()->_collection;
+    LogicalCollection* collection = guard.collection();
 
     SingleCollectionTransaction trx(
-        StandaloneTransactionContext::Create(_vocbase), document->_info.id(),
+        StandaloneTransactionContext::Create(_vocbase), collection->cid(),
         TRI_TRANSACTION_WRITE);
 
     int res = trx.begin();
@@ -1898,11 +1888,11 @@ int RestReplicationHandler::processRestoreIndexes(VPackSlice const& collection,
     }
 
     for (VPackSlice const& idxDef : VPackArrayIterator(indexes)) {
-      arangodb::Index* idx = nullptr;
+      std::shared_ptr<arangodb::Index> idx;
 
       // {"id":"229907440927234","type":"hash","unique":false,"fields":["x","Y"]}
 
-      res = document->indexFromVelocyPack(&trx, idxDef, &idx);
+      res = collection->restoreIndex(&trx, idxDef, idx);
 
       if (res == TRI_ERROR_NOT_IMPLEMENTED) {
         continue;
@@ -1915,7 +1905,7 @@ int RestReplicationHandler::processRestoreIndexes(VPackSlice const& collection,
       } else {
         TRI_ASSERT(idx != nullptr);
 
-        res = document->saveIndex(idx, true);
+        res = collection->saveIndex(idx.get(), true);
 
         if (res != TRI_ERROR_NO_ERROR) {
           errorMsg =
@@ -1987,12 +1977,14 @@ int RestReplicationHandler::processRestoreIndexesCoordinator(
 
   // in a cluster, we only look up by name:
   ClusterInfo* ci = ClusterInfo::instance();
-  std::shared_ptr<LogicalCollection> col = ci->getCollection(dbName, name);
-
-  if (col == nullptr) {
+  std::shared_ptr<LogicalCollection> col;
+  try {
+    col = ci->getCollection(dbName, name);
+  } catch (...) {
     errorMsg = "could not find collection '" + name + "'";
     return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
   }
+  TRI_ASSERT(col != nullptr);
 
   int res = TRI_ERROR_NO_ERROR;
   for (VPackSlice const& idxDef : VPackArrayIterator(indexes)) {
@@ -2496,9 +2488,10 @@ void RestReplicationHandler::handleCommandRestoreDataCoordinator() {
 
   // in a cluster, we only look up by name:
   ClusterInfo* ci = ClusterInfo::instance();
-  std::shared_ptr<LogicalCollection> col = ci->getCollection(dbName, name);
-
-  if (col == nullptr) {
+  std::shared_ptr<LogicalCollection> col;
+  try {
+    col = ci->getCollection(dbName, name);
+  } catch (...) {
     generateError(rest::ResponseCode::BAD,
                   TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND);
     return;
@@ -3207,9 +3200,9 @@ void RestReplicationHandler::handleCommandDump() {
     size_t const length = TRI_LengthStringBuffer(dump._buffer);
 
     if (length == 0) {
-      setResponseCode(rest::ResponseCode::NO_CONTENT);
+      resetResponse(rest::ResponseCode::NO_CONTENT);
     } else {
-      setResponseCode(rest::ResponseCode::OK);
+      resetResponse(rest::ResponseCode::OK);
     }
 
     // TODO needs to generalized
@@ -3223,8 +3216,7 @@ void RestReplicationHandler::handleCommandDump() {
 
     // set headers
     _response->setHeaderNC(
-        TRI_REPLICATION_HEADER_CHECKMORE,
-        ((dump._hasMore || dump._bufferFull) ? "true" : "false"));
+        TRI_REPLICATION_HEADER_CHECKMORE, (dump._hasMore ? "true" : "false"));
 
     _response->setHeaderNC(TRI_REPLICATION_HEADER_LASTINCLUDED,
                            StringUtils::itoa(dump._lastFoundTick));
@@ -3861,16 +3853,7 @@ void RestReplicationHandler::handleCommandAddFollower() {
     return;
   }
 
-  TRI_collection_t* docColl = col->_collection;
-  if (docColl == nullptr) {
-    generateError(rest::ResponseCode::SERVER_ERROR,
-                  TRI_ERROR_ARANGO_COLLECTION_NOT_LOADED,
-                  "collection not loaded");
-    return;
-  }
-
-  TRI_ASSERT(docColl != nullptr);
-  docColl->followers()->add(followerId.copyString());
+  col->followers()->add(followerId.copyString());
 
   VPackBuilder b;
   {
@@ -3918,16 +3901,7 @@ void RestReplicationHandler::handleCommandRemoveFollower() {
     return;
   }
 
-  TRI_collection_t* docColl = col->_collection;
-  if (docColl == nullptr) {
-    generateError(rest::ResponseCode::SERVER_ERROR,
-                  TRI_ERROR_ARANGO_COLLECTION_NOT_LOADED,
-                  "collection not loaded");
-    return;
-  }
-
-  TRI_ASSERT(docColl != nullptr);
-  docColl->followers()->remove(followerId.copyString());
+  col->followers()->remove(followerId.copyString());
 
   VPackBuilder b;
   {
@@ -3992,8 +3966,7 @@ void RestReplicationHandler::handleCommandHoldReadLockCollection() {
     }
   }
 
-  TRI_collection_t* docColl = col->_collection;
-  if (docColl == nullptr) {
+  if (col->getStatusLocked() != TRI_VOC_COL_STATUS_LOADED) {
     generateError(rest::ResponseCode::SERVER_ERROR,
                   TRI_ERROR_ARANGO_COLLECTION_NOT_LOADED,
                   "collection not loaded");

@@ -41,7 +41,6 @@
 #include "Utils/OperationResult.h"
 #include "Utils/SingleCollectionTransaction.h"
 #include "Utils/StandaloneTransactionContext.h"
-#include "VocBase/collection.h"
 #include "VocBase/vocbase.h"
 
 using namespace arangodb::consensus;
@@ -49,7 +48,6 @@ using namespace arangodb::rest;
 using namespace arangodb::velocypack;
 using namespace arangodb;
 
-static const std::string NO_LEADER = "";
 //  (std::numeric_limits<std::string>::max)();
 
 /// Raft role names for display purposes 
@@ -215,6 +213,8 @@ void Constituent::lead(std::map<std::string, bool> const& votes) {
 void Constituent::candidate() {
   
   MUTEX_LOCKER(guard, _castLock);
+
+  _leaderID = NO_LEADER;
   
   if (_role != CANDIDATE)
     LOG_TOPIC(DEBUG, Logger::AGENCY)

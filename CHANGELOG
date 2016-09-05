@@ -1,6 +1,17 @@
 devel
 -----
 
+* renamed `maximalSize` attribute in parameter.json files to `journalSize`
+
+  The `maximalSize` attribute will still be picked up from collections that
+  have not been adjusted. Responses from the replication API will now also use
+  `journalSize` instead of `maximalSize`.
+
+* added --cluster.system-replication-factor in order to adjust the
+  replication factor for new system collections
+
+* fixed issue #2012
+
 * added a memory expection in case V8 memory gets too low
 
 * fixed epoch computation in hybrid logical clock
@@ -42,11 +53,21 @@ devel
 
 * added module.context.createDocumentationRouter to replace module.context.apiDocumentation
 
+* bug in RAFT implementation of reads. dethroned leader still answered
+	requests in isolation
 
 v3.0.6 (XXXX-XX-XX)
 -------------------
 
+* fixed issue #2026
+
+* slightly better error diagnostics for AQL query compilation and replication
+
 * fixed issue #2018
+
+* fixed issue #2015
+
+* fixed issue #2012
 
 * fixed wrong default value for arangoimp's `--on-duplicate` value
 

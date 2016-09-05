@@ -25,9 +25,54 @@
 #include "GeneralResponse.h"
 
 #include "Basics/StringUtils.h"
+#include "Basics/VelocyPackHelper.h"
 
 using namespace arangodb;
 using namespace arangodb::basics;
+
+void GeneralResponse::addPayload(VPackSlice const& slice,
+                                 arangodb::velocypack::Options const* options,
+                                 bool resolve_externals) {
+  addPayloadPreconditions();
+  addPayloadPreHook(false, resolve_externals);
+  if (!options) {
+    options = &arangodb::velocypack::Options::Defaults;
+  }
+
+  if (resolve_externals) {
+    auto tmpBuffer =
+        basics::VelocyPackHelper::sanitizeExternalsChecked(slice, options);
+    _vpackPayloads.push_back(std::move(tmpBuffer));
+  } else {
+    // just copy
+    _vpackPayloads.emplace_back(slice.byteSize());
+    _vpackPayloads.back().append(slice.startAs<char const>(), slice.byteSize());
+  }
+  addPayloadPostHook(options);
+};
+
+void GeneralResponse::addPayload(VPackBuffer<uint8_t>&& buffer,
+                                 arangodb::velocypack::Options const* options,
+                                 bool resolve_externals) {
+  addPayloadPreconditions();
+  // TODO
+  // skip sanatizing here for http if conent type is json because it will
+  // be dumped anyway -- check with jsteemann
+  addPayloadPreHook(true, resolve_externals);
+
+  if (!options) {
+    options = &arangodb::velocypack::Options::Defaults;
+  }
+
+  if (resolve_externals) {
+    auto tmpBuffer = basics::VelocyPackHelper::sanitizeExternalsChecked(
+        VPackSlice(buffer.data()), options);
+    _vpackPayloads.push_back(std::move(tmpBuffer));
+  } else {
+    _vpackPayloads.push_back(std::move(buffer));
+  }
+  addPayloadPostHook(options);
+};
 
 std::string GeneralResponse::responseString(ResponseCode code) {
   switch (code) {
@@ -159,8 +204,7 @@ std::string GeneralResponse::responseString(ResponseCode code) {
   return StringUtils::itoa((int)code) + " Unknown";
 }
 
-rest::ResponseCode GeneralResponse::responseCode(
-    std::string const& str) {
+rest::ResponseCode GeneralResponse::responseCode(std::string const& str) {
   int number = ::atoi(str.c_str());
 
   switch (number) {
@@ -391,7 +435,6 @@ rest::ResponseCode GeneralResponse::responseCode(int code) {
     case TRI_ERROR_USER_DUPLICATE:
     case TRI_ERROR_TASK_DUPLICATE_ID:
     case TRI_ERROR_GRAPH_DUPLICATE:
-    case TRI_ERROR_QUEUE_ALREADY_EXISTS:
       return ResponseCode::CONFLICT;
 
     case TRI_ERROR_DEADLOCK:

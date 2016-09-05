@@ -136,18 +136,15 @@ void WorkMonitor::run() {
 }
 
 void WorkMonitor::pushHandler(RestHandler* handler) {
-#if 0
   TRI_ASSERT(handler != nullptr);
   WorkDescription* desc = createWorkDescription(WorkType::HANDLER);
   desc->_data.handler = handler;
   TRI_ASSERT(desc->_type == WorkType::HANDLER);
 
   activateWorkDescription(desc);
-#endif
 }
 
 WorkDescription* WorkMonitor::popHandler(RestHandler* handler, bool free) {
-#if 0
   WorkDescription* desc = deactivateWorkDescription();
 
   TRI_ASSERT(desc != nullptr);
@@ -165,12 +162,6 @@ WorkDescription* WorkMonitor::popHandler(RestHandler* handler, bool free) {
   }
 
   return desc;
-#endif
-  if (free) {
-    delete handler;
-  }
-  
-  return nullptr;
 }
 
 bool WorkMonitor::cancelAql(WorkDescription* desc) {

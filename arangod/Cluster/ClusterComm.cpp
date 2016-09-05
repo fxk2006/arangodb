@@ -945,9 +945,8 @@ void ClusterComm::asyncAnswer(std::string& coordinatorHeader,
 
   // We add this result to the operation struct without acquiring
   // a lock, since we know that only we do such a thing:
-  std::unique_ptr<httpclient::SimpleHttpResult> result(
-      client->request(rest::RequestType::PUT, "/_api/shard-comm",
-                      body, len, headers));
+  std::unique_ptr<httpclient::SimpleHttpResult> result(client->request(
+      rest::RequestType::PUT, "/_api/shard-comm", body, len, headers));
   if (result.get() == nullptr || !result->isComplete()) {
     cm->brokenConnection(connection);
     client->invalidateConnection();
@@ -1273,9 +1272,8 @@ size_t ClusterComm::performRequests(std::vector<ClusterCommRequest>& requests,
           requests[index].result = res;
 
           // In this case we will retry:
-          dueTime[index] = (std::min)(10.0,
-                                      (std::max)(0.2, 2 * (now - startTime))) +
-                           now;
+          dueTime[index] =
+              (std::min)(10.0, (std::max)(0.2, 2 * (now - startTime))) + now;
           if (dueTime[index] >= endTime) {
             requests[index].done = true;
             nrDone++;
@@ -1350,6 +1348,11 @@ size_t ClusterComm::performSingleRequest(
     THROW_ARANGO_EXCEPTION(TRI_ERROR_CLUSTER_BACKEND_UNAVAILABLE);
   }
 
+  if (req.result.status == CL_COMM_ERROR && req.result.result != nullptr
+      && req.result.result->getHttpReturnCode() == 503) {
+    THROW_ARANGO_EXCEPTION(TRI_ERROR_CLUSTER_BACKEND_UNAVAILABLE);
+  }
+  
   // Add correct recognition of content type later.
   req.result.status = CL_COMM_RECEIVED;  // a fake, but a good one
   req.done = true;
@@ -1362,6 +1365,13 @@ size_t ClusterComm::performSingleRequest(
   rest::ContentType type = rest::ContentType::JSON;
 
   basics::StringBuffer& buffer = req.result.result->getBody();
+
+  // PERFORMANCE TODO (fc) (max) (obi)
+  // body() could return a basic_string_ref
+
+  // The FakeRequest Replacement does a copy of the body and is not as fast
+  // as the original
+
   // auto answer = new FakeRequest(type, buffer.c_str(),
   //                              static_cast<int64_t>(buffer.length()));
   // answer->setHeaders(req.result.result->getHeaderFields());
@@ -1371,8 +1381,8 @@ size_t ClusterComm::performSingleRequest(
       req.result.result->getHeaderFields());
 
   req.result.answer.reset(static_cast<GeneralRequest*>(answer));
-  req.result.answer_code = static_cast<rest::ResponseCode>(
-      req.result.result->getHttpReturnCode());
+  req.result.answer_code =
+      static_cast<rest::ResponseCode>(req.result.result->getHttpReturnCode());
   return (req.result.answer_code == rest::ResponseCode::OK ||
           req.result.answer_code == rest::ResponseCode::CREATED ||
           req.result.answer_code == rest::ResponseCode::ACCEPTED)
@@ -1443,17 +1453,18 @@ void ClusterCommThread::run() {
           }
         } else {
           if (nullptr != op->body.get()) {
-            LOG(DEBUG) << "sending "
-                       << arangodb::HttpRequest::translateMethod(op->reqtype)
-                              .c_str() << " request to DB server '"
-                       << op->result.serverID << "' at endpoint '"
-                       << op->result.endpoint << "': " << op->body->c_str();
+            LOG(DEBUG)
+                << "sending "
+                << arangodb::HttpRequest::translateMethod(op->reqtype).c_str()
+                << " request to DB server '" << op->result.serverID
+                << "' at endpoint '" << op->result.endpoint
+                << "': " << op->body->c_str();
           } else {
-            LOG(DEBUG) << "sending "
-                       << arangodb::HttpRequest::translateMethod(op->reqtype)
-                              .c_str() << " request to DB server '"
-                       << op->result.serverID << "' at endpoint '"
-                       << op->result.endpoint << "'";
+            LOG(DEBUG)
+                << "sending "
+                << arangodb::HttpRequest::translateMethod(op->reqtype).c_str()
+                << " request to DB server '" << op->result.serverID
+                << "' at endpoint '" << op->result.endpoint << "'";
           }
 
           auto client =

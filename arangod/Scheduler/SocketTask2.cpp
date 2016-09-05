@@ -38,16 +38,16 @@ using namespace arangodb::rest;
 
 SocketTask2::SocketTask2(EventLoop2 loop, TRI_socket_t socket,
                          double keepAliveTimeout)
-    : Task2(loop, "SocketTask2"), _stream(loop._ioService) {
-  _readBuffer = new StringBuffer(TRI_UNKNOWN_MEM_ZONE, false);
-
+  : Task2(loop, "SocketTask2"),
+    _readBuffer(TRI_UNKNOWN_MEM_ZONE, READ_BLOCK_SIZE + 1, false),
+    _stream(loop._ioService) {
   ConnectionStatisticsAgent::acquire();
   connectionStatisticsAgentSetStart();
 
   boost::system::error_code ec;
   _stream.assign(boost::asio::ip::tcp::v4(), socket.fileDescriptor, ec);
 
-  _stream.non_blocking(false);
+  _stream.non_blocking(true);
 
   if (ec) {
     LOG_TOPIC(ERR, Logger::COMMUNICATION) << "cannot create stream from socket"
@@ -225,7 +225,7 @@ void SocketTask2::closeStream() {
 // -----------------------------------------------------------------------------
 
 bool SocketTask2::reserveMemory() {
-  if (_readBuffer->reserve(READ_BLOCK_SIZE + 1) == TRI_ERROR_OUT_OF_MEMORY) {
+  if (_readBuffer.reserve(READ_BLOCK_SIZE + 1) == TRI_ERROR_OUT_OF_MEMORY) {
     LOG(WARN) << "out of memory while reading from client";
     closeStream();
     return false;
@@ -241,13 +241,13 @@ bool SocketTask2::trySyncRead() {
     }
 
     size_t bytesRead = _stream.read_some(
-        boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE));
+        boost::asio::buffer(_readBuffer.end(), READ_BLOCK_SIZE));
 
     if (0 == bytesRead) {
       return false;  // should not happen
     }
 
-    _readBuffer->increaseLength(bytesRead);
+    _readBuffer.increaseLength(bytesRead);
     return true;
   } catch (boost::system::system_error err) {
     if (err.code() == boost::asio::error::would_block) {
@@ -263,24 +263,23 @@ void SocketTask2::asyncReadSome() {
 
   try {
     JobGuard guard(_loop._scheduler);
+    size_t n = 0;
 
     while (guard.tryDirect()) {
-      LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "directly handling on "
-                                              << info;
-
       if (!reserveMemory()) {
         LOG_TOPIC(TRACE, Logger::COMMUNICATION)
             << "failed to reserve memory for " << info;
-
         return;
       }
 
       if (!trySyncRead()) {
-        LOG_TOPIC(TRACE, Logger::COMMUNICATION)
-            << "cannot read data synchronously " << info
-            << ", falling back to asynchronous read";
-
-        break;
+	if (++n > 2) {
+	  break;
+	} else {
+	  guard.release();
+	  sched_yield();
+	  continue;
+	}
       }
 
       while (processRead()) {
@@ -315,7 +314,7 @@ void SocketTask2::asyncReadSome() {
 
   // try to read more bytes
   _stream.async_read_some(
-      boost::asio::buffer(_readBuffer->end(), READ_BLOCK_SIZE),
+      boost::asio::buffer(_readBuffer.end(), READ_BLOCK_SIZE),
       [this, info](const boost::system::error_code& ec,
                    std::size_t transferred) {
         if (ec) {
@@ -323,7 +322,7 @@ void SocketTask2::asyncReadSome() {
                                                   << " failed with " << ec;
           closeStream();
         } else {
-          _readBuffer->increaseLength(transferred);
+          _readBuffer.increaseLength(transferred);
 
           while (processRead()) {
             if (_closeRequested) {

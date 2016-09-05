@@ -49,7 +49,7 @@ function agencyTestSuite () {
   var whoseTurn = 0;
   var request = require("@arangodb/request");
 
-  wait(2);
+  wait(3.0);
 
   function readAgency(list) {
     // We simply try all agency servers in turn until one gives us an HTTP
@@ -529,6 +529,13 @@ function agencyTestSuite () {
       var res = writeAgency([[{"/bumms":{"op":"set","new":"fallera"}, "/bummsfallera": {"op":"set","new":"lalalala"}}]]);
       assertEqual(res.statusCode, 200);
       assertEqual(readAndCheck([["/bumms", "/bummsfallera"]]), [{bumms:"fallera", bummsfallera: "lalalala"}]);
+    },
+
+    testThousand: function() {
+      var i;
+      for (i = 0; i < 1000; i++) {
+        writeAndCheck([[{x:12}]]);
+      }
     }
   };
 }

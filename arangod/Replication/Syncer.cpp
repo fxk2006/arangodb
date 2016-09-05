@@ -33,7 +33,6 @@
 #include "Utils/OperationOptions.h"
 #include "Utils/OperationResult.h"
 #include "Utils/SingleCollectionTransaction.h"
-#include "VocBase/collection.h"
 #include "VocBase/LogicalCollection.h"
 #include "VocBase/transaction.h"
 #include "VocBase/vocbase.h"
@@ -309,20 +308,7 @@ int Syncer::sendRemoveBarrier() {
 ////////////////////////////////////////////////////////////////////////////////
 
 TRI_voc_cid_t Syncer::getCid(VPackSlice const& slice) const {
-  if (!slice.isObject()) {
-    return 0;
-  }
-  VPackSlice id = slice.get("cid");
-
-  if (id.isString()) {
-    // string cid, e.g. "9988488"
-    return StringUtils::uint64(id.copyString());
-  } else if (id.isNumber()) {
-    // numeric cid, e.g. 9988488
-    return id.getNumericValue<TRI_voc_cid_t>();
-  }
-
-  return 0;
+  return VelocyPackHelper::extractIdValue(slice);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -406,13 +392,15 @@ int Syncer::applyCollectionDumpMarker(
       res = opRes.code;
     } catch (arangodb::basics::Exception const& ex) {
       res = ex.code();
-    } catch (...) {
-      res = TRI_ERROR_INTERNAL;
-    }
-
-    if (res != TRI_ERROR_NO_ERROR) {
       errorMsg = "document insert/replace operation failed: " +
                  std::string(TRI_errno_string(res));
+    } catch (std::exception const& ex) {
+      res = TRI_ERROR_INTERNAL;
+      errorMsg = "document insert/replace operation failed: " +
+                 std::string(ex.what());
+    } catch (...) {
+      res = TRI_ERROR_INTERNAL;
+      errorMsg = "document insert/replace operation failed: unknown exception";
     }
 
     return res;
@@ -436,15 +424,16 @@ int Syncer::applyCollectionDumpMarker(
       res = opRes.code;
     } catch (arangodb::basics::Exception const& ex) {
       res = ex.code();
-    } catch (...) {
-      res = TRI_ERROR_INTERNAL;
-    }
-    
-    if (res != TRI_ERROR_NO_ERROR) {
       errorMsg = "document remove operation failed: " +
                  std::string(TRI_errno_string(res));
+    } catch (std::exception const& ex) {
+      errorMsg = "document remove operation failed: " +
+                 std::string(ex.what());
+    } catch (...) {
+      res = TRI_ERROR_INTERNAL;
+      errorMsg = "document remove operation failed: unknown exception";
     }
-
+    
     return res;
   }
     
@@ -497,13 +486,20 @@ int Syncer::createCollection(VPackSlice const& slice, arangodb::LogicalCollectio
 
   VPackBuilder merged = VPackCollection::merge(s.slice(), slice, true);
 
-  VocbaseCollectionInfo params(_vocbase, name.c_str(), merged.slice(), true);
-
-  col = _vocbase->createCollection(params, cid, true);
-
-  if (col == nullptr) {
-    return TRI_errno();
+  int res = TRI_ERROR_NO_ERROR;
+  try {
+    col = _vocbase->createCollection(merged.slice(), cid, true);
+  } catch (basics::Exception const& ex) {
+    res = ex.code();
+  } catch (...) {
+    res = TRI_ERROR_INTERNAL;
   }
+
+  if (res != TRI_ERROR_NO_ERROR) {
+    return res;
+  }
+
+  TRI_ASSERT(col != nullptr);
 
   if (dst != nullptr) {
     *dst = col;
@@ -527,7 +523,7 @@ int Syncer::dropCollection(VPackSlice const& slice, bool reportError) {
     return TRI_ERROR_NO_ERROR;
   }
 
-  return _vocbase->dropCollection(col, true);
+  return _vocbase->dropCollection(col, true, true);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -558,7 +554,7 @@ int Syncer::createIndex(VPackSlice const& slice) {
       return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
     }
 
-    TRI_collection_t* document = guard.collection()->_collection;
+    LogicalCollection* collection = guard.collection();
 
     SingleCollectionTransaction trx(StandaloneTransactionContext::Create(_vocbase), guard.collection()->cid(), TRI_TRANSACTION_WRITE);
 
@@ -568,11 +564,11 @@ int Syncer::createIndex(VPackSlice const& slice) {
       return res;
     }
 
-    arangodb::Index* idx = nullptr;
-    res = document->indexFromVelocyPack(&trx, indexSlice, &idx);
+    std::shared_ptr<arangodb::Index> idx;
+    res = collection->restoreIndex(&trx, indexSlice, idx);
 
     if (res == TRI_ERROR_NO_ERROR) {
-      res = document->saveIndex(idx, true);
+      res = collection->saveIndex(idx.get(), true);
     }
 
     res = trx.finish(res);
@@ -616,9 +612,9 @@ int Syncer::dropIndex(arangodb::velocypack::Slice const& slice) {
       return TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND;
     }
 
-    TRI_collection_t* document = guard.collection()->_collection;
+    LogicalCollection* collection = guard.collection();
 
-    bool result = document->dropIndex(iid, true);
+    bool result = collection->dropIndex(iid, true);
 
     if (!result) {
       return TRI_ERROR_NO_ERROR;

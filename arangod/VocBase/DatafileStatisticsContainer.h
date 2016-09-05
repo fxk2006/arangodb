@@ -18,27 +18,33 @@
 ///
 /// Copyright holder is ArangoDB GmbH, Cologne, Germany
 ///
-/// @author Michael Hackstein
+/// @author Jan Steemann
 ////////////////////////////////////////////////////////////////////////////////
 
-#ifndef ARANGOD_VOCBASE_DATAFILE_DESCRIPTION_H
-#define ARANGOD_VOCBASE_DATAFILE_DESCRIPTION_H 1
+#ifndef ARANGOD_VOC_BASE_DATAFILE_STATISTICS_CONTAINER_H
+#define ARANGOD_VOC_BASE_DATAFILE_STATISTICS_CONTAINER_H 1
 
 #include "Basics/Common.h"
-#include "VocBase/voc-types.h"
-
-struct TRI_datafile_t;
 
 namespace arangodb {
 
-struct DatafileDescription {
-  TRI_datafile_t const* _data;
-  TRI_voc_tick_t _dataMin;
-  TRI_voc_tick_t _dataMax;
-  TRI_voc_tick_t _tickMax;
-  bool _isJournal;
+/// @brief datafile statistics
+struct DatafileStatisticsContainer {
+  DatafileStatisticsContainer();
+
+  void update(DatafileStatisticsContainer const&);
+  void reset();
+
+  int64_t numberAlive;
+  int64_t numberDead;
+  int64_t numberDeletions;
+
+  int64_t sizeAlive;
+  int64_t sizeDead;
+
+  int64_t numberUncollected;
 };
 
-}  // namespace arangodb
+}
 
 #endif

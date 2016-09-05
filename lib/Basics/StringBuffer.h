@@ -210,22 +210,34 @@ int TRI_AppendString2StringBuffer(TRI_string_buffer_t* self, char const* str,
 ////////////////////////////////////////////////////////////////////////////////
 
 static inline void TRI_AppendCharUnsafeStringBuffer(TRI_string_buffer_t* self, char chr) {
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+  TRI_ASSERT(self->_len - static_cast<size_t>(self->_current - self->_buffer) > 0);
+#endif
   *self->_current++ = chr;
 }
 
 static inline void TRI_AppendStringUnsafeStringBuffer(TRI_string_buffer_t* self, char const* str) {
   size_t len = strlen(str);
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+  TRI_ASSERT(self->_len - static_cast<size_t>(self->_current - self->_buffer) >= len);
+#endif
   memcpy(self->_current, str, len);
   self->_current += len;
 }
 
 static inline void TRI_AppendStringUnsafeStringBuffer(TRI_string_buffer_t* self, char const* str,
                                                       size_t len) {
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+  TRI_ASSERT(self->_len - static_cast<size_t>(self->_current - self->_buffer) >= len);
+#endif
   memcpy(self->_current, str, len);
   self->_current += len;
 }
 
 static inline void TRI_AppendStringUnsafeStringBuffer(TRI_string_buffer_t* self, std::string const& str) {
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+  TRI_ASSERT(self->_len - static_cast<size_t>(self->_current - self->_buffer) >= str.size());
+#endif
   memcpy(self->_current, str.c_str(), str.size());
   self->_current += str.size();
 }
@@ -302,18 +314,6 @@ int TRI_AppendInt64StringBuffer(TRI_string_buffer_t* self, int64_t attr);
 ////////////////////////////////////////////////////////////////////////////////
 
 int TRI_AppendUInt64StringBuffer(TRI_string_buffer_t* self, uint64_t attr);
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief appends unsigned integer with 32 bits in octal
-////////////////////////////////////////////////////////////////////////////////
-
-int TRI_AppendUInt32OctalStringBuffer(TRI_string_buffer_t* self, uint32_t attr);
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief appends unsigned integer with 64 bits in octal
-////////////////////////////////////////////////////////////////////////////////
-
-int TRI_AppendUInt64OctalStringBuffer(TRI_string_buffer_t* self, uint64_t attr);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief appends unsigned integer with 32 bits in hex
@@ -967,36 +967,6 @@ class StringBuffer {
 
   StringBuffer& appendInteger(size_t attr) {
     return appendInteger(sizetint_t(attr));
-  }
-
-#endif
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief appends unsigned integer with 32 bits in octal
-  //////////////////////////////////////////////////////////////////////////////
-
-  StringBuffer& appendOctal(uint32_t attr) {
-    TRI_AppendUInt32OctalStringBuffer(&_buffer, attr);
-    return *this;
-  }
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief appends unsigned integer with 64 bits in octal
-  //////////////////////////////////////////////////////////////////////////////
-
-  StringBuffer& appendOctal(uint64_t attr) {
-    TRI_AppendUInt64OctalStringBuffer(&_buffer, attr);
-    return *this;
-  }
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief appends size_t in octal
-////////////////////////////////////////////////////////////////////////////////
-
-#ifdef TRI_OVERLOAD_FUNCS_SIZE_T
-
-  StringBuffer& appendOctal(size_t attr) {
-    return appendOctal(sizetint_t(attr));
   }
 
 #endif

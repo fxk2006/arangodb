@@ -25,7 +25,7 @@
 #define ARANGOD_VOCBASE_PHYSICAL_COLLECTION_H 1
 
 #include "Basics/Common.h"
-#include "VocBase/DatafileDescription.h"
+#include "VocBase/DatafileStatisticsContainer.h"
 #include "VocBase/voc-types.h"
 
 #include <velocypack/Builder.h>
@@ -34,6 +34,7 @@ struct TRI_datafile_t;
 struct TRI_df_marker_t;
 
 namespace arangodb {
+class Ditches;
 class LogicalCollection;
 
 class PhysicalCollection {
@@ -42,6 +43,8 @@ class PhysicalCollection {
 
  public:
   virtual ~PhysicalCollection() = default;
+  
+  virtual Ditches* ditches() const = 0;
 
   virtual TRI_voc_rid_t revision() const = 0;
   
@@ -50,54 +53,53 @@ class PhysicalCollection {
   
   virtual int64_t initialCount() const = 0;
 
+  virtual void updateCount(int64_t) = 0;
+
   virtual void figures(std::shared_ptr<arangodb::velocypack::Builder>&) = 0;
   
   virtual int close() = 0;
   
-  virtual int applyForTickRange(TRI_voc_tick_t dataMin, TRI_voc_tick_t dataMax,
-                                std::function<bool(TRI_voc_tick_t foundTick, TRI_df_marker_t const* marker)> const& callback) = 0;
-
   /// @brief rotate the active journal - will do nothing if there is no journal
   virtual int rotateActiveJournal() = 0;
   
-  /// @brief sync the active journal - will do nothing if there is no journal
-  /// or if the journal is volatile
-  virtual int syncActiveJournal() = 0;
+  virtual int applyForTickRange(TRI_voc_tick_t dataMin, TRI_voc_tick_t dataMax,
+                                std::function<bool(TRI_voc_tick_t foundTick, TRI_df_marker_t const* marker)> const& callback) = 0;
 
-  /// @brief reserve space in the current journal. if no create exists or the
-  /// current journal cannot provide enough space, close the old journal and
-  /// create a new one
-  virtual int reserveJournalSpace(TRI_voc_tick_t tick, TRI_voc_size_t size,
-                                  char*& resultPosition, TRI_datafile_t*& resultDatafile) = 0;
-  
-  /// @brief create compactor file
-  virtual TRI_datafile_t* createCompactor(TRI_voc_fid_t fid, TRI_voc_size_t maximalSize) = 0;
-  
-  /// @brief close an existing compactor
-  virtual int closeCompactor(TRI_datafile_t* datafile) = 0;
-  
-  /// @brief replace a datafile with a compactor
-  virtual int replaceDatafileWithCompactor(TRI_datafile_t* datafile, TRI_datafile_t* compactor) = 0;
-  
-  virtual bool removeCompactor(TRI_datafile_t*) = 0;
-  virtual bool removeDatafile(TRI_datafile_t*) = 0;
-  
-  /// @brief seal a datafile
-  virtual int sealDatafile(TRI_datafile_t* datafile, bool isCompactor) = 0;
-  
-  /// @brief creates a datafile
-  virtual TRI_datafile_t* createDatafile(TRI_voc_fid_t fid,
-                                         TRI_voc_size_t journalSize, 
-                                         bool isCompactor) = 0;
-
-  /// @brief closes the datafiles passed in the vector
-  virtual bool closeDatafiles(std::vector<TRI_datafile_t*> const& files) = 0;
-  
   /// @brief iterates over a collection
   virtual bool iterateDatafiles(std::function<bool(TRI_df_marker_t const*, TRI_datafile_t*)> const& cb) = 0;
 
-  virtual std::vector<DatafileDescription> datafilesInRange(TRI_voc_tick_t dataMin, TRI_voc_tick_t dataMax) = 0;
+  /// @brief increase dead stats for a datafile, if it exists
+  virtual void increaseDeadStats(TRI_voc_fid_t fid, int64_t number, int64_t size) = 0;
   
+  /// @brief increase dead stats for a datafile, if it exists
+  virtual void updateStats(TRI_voc_fid_t fid, DatafileStatisticsContainer const& values) = 0;
+  
+  /// @brief create statistics for a datafile, using the stats provided
+  virtual void createStats(TRI_voc_fid_t fid, DatafileStatisticsContainer const& values) = 0;
+
+  /// @brief disallow compaction of the collection 
+  /// after this call it is guaranteed that no compaction will be started until allowCompaction() is called
+  virtual void preventCompaction() = 0;
+
+  /// @brief try disallowing compaction of the collection 
+  /// returns true if compaction is disallowed, and false if not
+  virtual bool tryPreventCompaction() = 0;
+
+  /// @brief re-allow compaction of the collection 
+  virtual void allowCompaction() = 0;
+  
+  /// @brief exclusively lock the collection for compaction
+  virtual void lockForCompaction() = 0;
+  
+  /// @brief try to exclusively lock the collection for compaction
+  /// after this call it is guaranteed that no compaction will be started until allowCompaction() is called
+  virtual bool tryLockForCompaction() = 0;
+
+  /// @brief signal that compaction is finished
+  virtual void finishCompaction() = 0;
+  
+  virtual void open(bool ignoreErrors) = 0;
+
  protected:
   LogicalCollection* _logicalCollection;
 };

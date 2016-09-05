@@ -199,6 +199,8 @@ void Agent::reportIn(std::string const& id, index_t index) {
 
   MUTEX_LOCKER(mutexLocker, _ioLock);
 
+  _lastAcked[id] = std::chrono::system_clock::now();
+
   if (index > _confirmed[id]) {  // progress this follower?
     _confirmed[id] = index;
   }
@@ -252,15 +254,20 @@ bool Agent::recvAppendEntriesRPC(
 
   MUTEX_LOCKER(mutexLocker, _ioLock);
 
-  if (this->term() > term) {
-    LOG_TOPIC(WARN, Logger::AGENCY) << "I have a higher term than RPC caller.";
-    return false;
+  if (this->term() > term) { // peer at higher term 
+    if (leaderCommitIndex >= _lastCommitIndex) { // 
+      _constituent.follow(term);
+    } else {
+      LOG_TOPIC(WARN, Logger::AGENCY) << "I have a higher term than RPC caller.";
+      return false;
+    }
   }
-
+  
   if (!_constituent.vote(term, leaderId, prevIndex, prevTerm, true)) {
+    LOG_TOPIC(WARN, Logger::AGENCY) << "Not voting for " << leaderId;
     return false;
   }
-
+  
   size_t nqs   = queries->slice().length();
 
   if (nqs > 0) {
@@ -333,7 +340,7 @@ priv_rpc_ret_t Agent::sendAppendEntriesRPC(std::string const& follower_id) {
   builder.close();
 
   // Verbose output
-  if (unconfirmed.size() > 1) {
+ if (unconfirmed.size() > 1) {
     LOG_TOPIC(DEBUG, Logger::AGENCY) << "Appending " << unconfirmed.size() - 1
                                      << " entries up to index " << highest
                                      << " to follower " << follower_id;
@@ -348,7 +355,7 @@ priv_rpc_ret_t Agent::sendAppendEntriesRPC(std::string const& follower_id) {
     std::make_shared<std::string>(builder.toJson()), headerFields,
     std::make_shared<AgentCallback>(this, follower_id, highest),
     0.1*_config.minPing(), true, 0.05*_config.minPing());
-
+  
   _lastSent[follower_id] = std::chrono::system_clock::now();
   _lastHighest[follower_id] = highest;
   
@@ -433,6 +440,25 @@ bool Agent::load() {
 }
 
 
+
+/// Challenge my own leadership
+bool Agent::challengeLeadership() {
+
+  // Still leading?
+  size_t good = 0; 
+  for (auto const& i : _lastAcked) {
+    std::chrono::duration<double> m =
+      std::chrono::system_clock::now() - i.second;
+    if(0.9*_config.minPing() > m.count()) {
+      ++good;
+    }
+  }
+  return (good < size() / 2); // not counting myself
+  
+}
+
+
+
 /// Write new entries to replicated state and store
 write_ret_t Agent::write(query_t const& query) {
 
@@ -443,7 +469,13 @@ write_ret_t Agent::write(query_t const& query) {
   // Only leader else redirect
   if (!_constituent.leading()) {
     return write_ret_t(false, _constituent.leaderID());
+  } else {
+    if (challengeLeadership()) {
+      _constituent.candidate();
+      return write_ret_t(false, NO_LEADER);
+    }
   }
+
 
   // Apply to spearhead and get indices for log entries
   {
@@ -468,9 +500,16 @@ write_ret_t Agent::write(query_t const& query) {
 /// Read from store
 read_ret_t Agent::read(query_t const& query) {
 
+  MUTEX_LOCKER(mutexLocker, _ioLock);
+
   // Only leader else redirect
   if (!_constituent.leading()) {
     return read_ret_t(false, _constituent.leaderID());
+  } else {
+    if (challengeLeadership()) {
+      _constituent.candidate();
+      return read_ret_t(false, NO_LEADER);
+    }
   }
 
   // Retrieve data from readDB
@@ -549,7 +588,27 @@ bool Agent::lead() {
     CONDITION_LOCKER(guard, _appendCV);
     guard.broadcast();
   }
+
+  for (auto const& i : _config.active()) {
+    _lastAcked[i] = std::chrono::system_clock::now();
+  }
   
+  // Agency configuration
+  auto agency = std::make_shared<Builder>();
+  agency->openArray();
+  agency->openArray();
+  agency->openObject();
+  agency->add(".agency", VPackValue(VPackValueType::Object));
+  agency->add("term", VPackValue(term()));
+  agency->add("id", VPackValue(id()));
+  agency->add("active", _config.activeToBuilder()->slice());
+  agency->add("pool", _config.poolToBuilder()->slice());
+  agency->close();  
+  agency->close();  
+  agency->close();
+  agency->close();
+  write(agency);
+
   // Wake up supervision
   _supervision.wakeUp();
 

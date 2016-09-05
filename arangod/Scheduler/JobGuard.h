@@ -42,9 +42,6 @@ class JobGuard {
   bool tryDirect() {
     bool res = _scheduler->tryDirectThread();
 
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION)
-      << "JobGuard::tryDirect returned " << (res ? "true" : "false");
-
     if (res) {
       _isDirect = true;
     }
@@ -53,29 +50,21 @@ class JobGuard {
   }
 
   void undirect() {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "JobGuard::undirect()";
-
     _scheduler->undirectThread();
     _isBlocked = false;
   }
 
   void block() {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "JobGuard::block()";
-
     _scheduler->blockThread();
     _isBlocked = true;
   }
 
   void unblock() {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "JobGuard::unblock()";
-
     _scheduler->unblockThread();
     _isBlocked = false;
   }
 
   void release() {
-    LOG_TOPIC(TRACE, Logger::COMMUNICATION) << "JobGuard::release()";
-
     if (_isBlocked) {
       unblock();
     }

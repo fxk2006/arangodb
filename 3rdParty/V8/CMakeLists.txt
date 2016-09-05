@@ -61,9 +61,10 @@ list(APPEND V8_GYP_ARGS
 )
 
 if (CROSS_COMPILING)
-  list(APPEND V8_GYP_ARGS -DGYP_CROSSCOMPILE=1)
+  list(APPEND V8_GYP_ARGS
+  -Dhost_arch=${V8_PROC_ARCH}
+  -DGYP_CROSSCOMPILE=1)
 endif()
-
 
 ################################################################################
 ## ICU EXPORTS
@@ -453,10 +454,10 @@ else ()
   set(V8_CXXFLAGS "$ENV{V8_CXXFLAGS}")
   set(V8_LDFLAGS  "$ENV{V8_LDFLAGS}")
 
-  if (CMAKE_COMPILER_IS_GNUCC)
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(V8_CFLAGS   "${V8_CFLAGS} -fno-delete-null-pointer-checks")
     set(V8_CXXFLAGS "${V8_CXXFLAGS} -fno-delete-null-pointer-checks")
-  endif ()
+  endif()
 
   if (USE_DEBUG_V8)
     set(V8_TARGET_ARCH "${V8_PROC_ARCH}.debug")
@@ -487,7 +488,6 @@ else ()
 
   list(APPEND V8_GYP_ARGS
     -Ibuild/standalone.gypi
-    -Dv8_use_snapshot=true
     -Dmac_deployment_target=${CMAKE_OSX_DEPLOYMENT_TARGET}
     --depth=.
     -Dstandalone_static_library=1
@@ -496,6 +496,13 @@ else ()
     -Dv8_no_strict_aliasing=1
     -Dwerror=
   )
+
+  if (CROSS_COMPILING)
+    list(APPEND V8_GYP_ARGS -Dv8_use_snapshot=false )
+#  dependenis 'v8_libbase' and 'v8_libplatform' need be added in v8.gyp  (under 'v8_use_snapshot!="true"')
+  else ()
+    list(APPEND V8_GYP_ARGS -Dv8_use_snapshot=true )
+  endif()
 
   if (APPLE AND CMAKE_COMPILER_IS_CLANG)
     set(V8_CXXFLAGS "${V8_CXXFLAGS} -stdlib=libc++")

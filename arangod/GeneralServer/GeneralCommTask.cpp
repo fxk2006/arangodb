@@ -1,4 +1,4 @@
-////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
 /// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
@@ -67,7 +67,15 @@ void GeneralCommTask::executeRequest(
       request->header(StaticStrings::Async, found);
 
   // store the message id for error handling
-  auto messageId = response->messageId();
+  uint64_t messageId = 0UL;
+  if (request) {
+    messageId = request->messageId();
+  } else if (response) {
+    messageId = response->messageId();
+  } else {
+    LOG_TOPIC(WARN, Logger::COMMUNICATION)
+        << "could not find corresponding request/response";
+  }
 
   // create a handler, this takes ownership of request and response
   WorkItem::uptr<RestHandler> handler(
@@ -87,7 +95,7 @@ void GeneralCommTask::executeRequest(
   bool ok = false;
 
   if (found && (asyncExecution == "true" || asyncExecution == "store")) {
-    requestStatisticsAgentSetAsync();
+    getAgent(messageId)->requestStatisticsAgentSetAsync();
     uint64_t jobId = 0;
 
     if (asyncExecution == "store") {
@@ -139,7 +147,8 @@ void GeneralCommTask::processResponse(GeneralResponse* response) {
 void GeneralCommTask::signalTask(std::unique_ptr<TaskData> data) {
   // data response
   if (data->_type == TaskData::TASK_DATA_RESPONSE) {
-    data->RequestStatisticsAgent::transferTo(this);
+    data->RequestStatisticsAgent::transferTo(
+        getAgent(data->_response->messageId()));
     processResponse(data->_response.get());
   }
 
@@ -187,9 +196,23 @@ void GeneralCommTask::handleRequestDirectly(WorkItem::uptr<RestHandler> h) {
   HandlerWorkStack work(std::move(h));
   auto handler = work.handler();
 
-  RequestStatisticsAgent::transferTo(handler);
+  uint64_t messageId = 0UL;
+  auto req = handler->request();
+  auto res = handler->response();
+  if (req) {
+    messageId = req->messageId();
+  } else if (res) {
+    messageId = res->messageId();
+  } else {
+    LOG_TOPIC(WARN, Logger::COMMUNICATION)
+        << "could not find corresponding request/response";
+  }
+
+  auto agent = getAgent(messageId);
+
+  agent->transferTo(handler);
   RestHandler::status result = handler->executeFull();
-  handler->RequestStatisticsAgent::transferTo(this);
+  handler->RequestStatisticsAgent::transferTo(agent);
 
   switch (result) {
     case RestHandler::status::FAILED:

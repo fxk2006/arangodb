@@ -31,6 +31,9 @@
 #include "Utils/CollectionNameResolver.h"
 #include "V8Server/V8Traverser.h"
 
+#include <velocypack/Iterator.h>
+#include <velocypack/velocypack-aliases.h>
+
 using namespace arangodb::basics;
 using namespace arangodb::aql;
 
@@ -160,7 +163,7 @@ ShortestPathNode::ShortestPathNode(ExecutionPlan* plan, size_t id,
 ShortestPathNode::ShortestPathNode(ExecutionPlan* plan, size_t id,
                                    TRI_vocbase_t* vocbase,
                                    std::vector<std::string> const& edgeColls,
-                                   std::vector<TRI_edge_direction_e> directions,
+                                   std::vector<TRI_edge_direction_e> const& directions,
                                    Variable const* inStartVariable,
                                    std::string const& startVertexId,
                                    Variable const* inTargetVariable,

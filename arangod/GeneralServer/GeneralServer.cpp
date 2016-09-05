@@ -37,6 +37,7 @@
 #include "GeneralServer/GeneralServerJob.h"
 #include "GeneralServer/RestHandler.h"
 #include "Logger/Logger.h"
+#include "Rest/CommonDefines.h"
 #include "Scheduler/ListenTask.h"
 #include "Scheduler/Scheduler.h"
 #include "Scheduler/SchedulerFeature.h"
@@ -219,8 +220,7 @@ void GeneralServer::waitForWork() {
 }
 
 // -----------------------------------------------------------------------------
-// --SECTION--                                                 protected
-// methods
+// --SECTION--                                                 protected methods
 // -----------------------------------------------------------------------------
 
 bool GeneralServer::openEndpoint(Endpoint* endpoint) {

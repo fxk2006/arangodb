@@ -122,7 +122,7 @@ class PrimaryIndex final : public Index {
  public:
   PrimaryIndex() = delete;
 
-  explicit PrimaryIndex(TRI_collection_t*);
+  explicit PrimaryIndex(arangodb::LogicalCollection*);
 
   explicit PrimaryIndex(VPackSlice const&);
 
@@ -159,6 +159,8 @@ class PrimaryIndex final : public Index {
 
   int remove(arangodb::Transaction*, TRI_doc_mptr_t const*,
              bool) override final;
+
+  int unload() override final;
 
  public:
   TRI_doc_mptr_t* lookupKey(arangodb::Transaction*, VPackSlice const&) const;
