@@ -164,12 +164,14 @@ void GeneralCommTask::signalTask(std::unique_ptr<TaskData> data) {
 }
 
 bool GeneralCommTask::handleRequest(WorkItem::uptr<RestHandler> handler) {
+  JobGuard guard(_loop);
+
   if (handler->isDirect()) {
     handleRequestDirectly(std::move(handler));
     return true;
   }
 
-  if (_server->tryActive()) {
+  if (guard.isIdle()) {
     handleRequestDirectly(std::move(handler));
     return true;
   }
@@ -177,8 +179,6 @@ bool GeneralCommTask::handleRequest(WorkItem::uptr<RestHandler> handler) {
   bool startThread = handler->needsOwnThread();
 
   if (startThread) {
-    JobGuard guard(_loop._scheduler);
-
     guard.block();
     handleRequestDirectly(std::move(handler));
     return true;
@@ -193,6 +193,9 @@ bool GeneralCommTask::handleRequest(WorkItem::uptr<RestHandler> handler) {
 }
 
 void GeneralCommTask::handleRequestDirectly(WorkItem::uptr<RestHandler> h) {
+  JobGuard guard(_loop);
+  guard.work();
+
   HandlerWorkStack work(std::move(h));
   auto handler = work.handler();
 

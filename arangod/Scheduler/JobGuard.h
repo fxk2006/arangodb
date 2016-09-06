@@ -25,6 +25,7 @@
 
 #include "Basics/Common.h"
 
+#include "Scheduler/events.h"
 #include "Scheduler/Scheduler.h"
 
 namespace arangodb {
@@ -34,50 +35,70 @@ class Scheduler;
 
 class JobGuard {
  public:
-  JobGuard(rest::Scheduler* scheduler) : _scheduler(scheduler) {}
-
+  JobGuard(rest::EventLoop2 const& loop) : _scheduler(loop._scheduler) {}
   ~JobGuard() { release(); }
 
  public:
-  bool tryDirect() {
-    bool res = _scheduler->tryDirectThread();
-
-    if (res) {
-      _isDirect = true;
-    }
-
-    return res;
+  bool isIdle() {
+    return _scheduler->isIdle();
   }
 
-  void undirect() {
-    _scheduler->undirectThread();
-    _isBlocked = false;
+  void enterLoop() {
+    if (0 == _isBusy) {
+      _scheduler->enterThread();
+    }
+
+    ++_isBusy;
+  }
+
+  void work() {
+    if (0 == _isWorking) {
+      _scheduler->workThread();
+    }
+
+    ++_isWorking;
   }
 
   void block() {
-    _scheduler->blockThread();
-    _isBlocked = true;
-  }
-
-  void unblock() {
-    _scheduler->unblockThread();
-    _isBlocked = false;
+    if (0 == _isBlocked) {
+      _scheduler->blockThread();
+    }
+    
+    ++_isBlocked;
   }
 
   void release() {
-    if (_isBlocked) {
-      unblock();
+    if (0 < _isBusy) {
+      --_isBusy;
+
+      if (0 == _isBusy) {
+        _scheduler->unenterThread();
+      }
+    }
+    
+    if (0 < _isWorking) {
+      --_isWorking;
+
+      if (0 == _isWorking) {
+        _scheduler->unworkThread();
+      }
     }
 
-    if (_isDirect) {
-      undirect();
+    if (0 < _isBlocked) {
+      --_isBlocked;
+
+      if (0 == _isBlocked) {
+        _scheduler->unblockThread();
+      }
     }
   }
 
  private:
   rest::Scheduler* _scheduler;
-  bool _isDirect = false;
-  bool _isBlocked = false;
+
+  static thread_local size_t _isBusy;
+  static thread_local size_t _isWorking;
+  static thread_local size_t _isBlocked;
 };
 }
 

@@ -262,10 +262,13 @@ void SocketTask2::asyncReadSome() {
   auto info = _stream.native_handle();
 
   try {
-    JobGuard guard(_loop._scheduler);
+    JobGuard guard(_loop);
+    guard.enterLoop();
+
+    size_t const MAX_DIRECT_TRIES = 2;
     size_t n = 0;
 
-    while (guard.tryDirect()) {
+    while (++n <= MAX_DIRECT_TRIES) {
       if (!reserveMemory()) {
         LOG_TOPIC(TRACE, Logger::COMMUNICATION)
             << "failed to reserve memory for " << info;
@@ -273,13 +276,11 @@ void SocketTask2::asyncReadSome() {
       }
 
       if (!trySyncRead()) {
-	if (++n > 2) {
-	  break;
-	} else {
-	  guard.release();
-	  sched_yield();
-	  continue;
-	}
+        if (n < MAX_DIRECT_TRIES) {
+          sched_yield();
+        }
+
+        continue;
       }
 
       while (processRead()) {
@@ -295,8 +296,6 @@ void SocketTask2::asyncReadSome() {
         closeReceiveStream();
         return;
       }
-
-      guard.release();
     }
   } catch (boost::system::system_error err) {
     LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "i/o stream " << info
@@ -313,6 +312,12 @@ void SocketTask2::asyncReadSome() {
   }
 
   // try to read more bytes
+  if (!reserveMemory()) {
+    LOG_TOPIC(TRACE, Logger::COMMUNICATION)
+      << "failed to reserve memory for " << info;
+    return;
+  }
+
   _stream.async_read_some(
       boost::asio::buffer(_readBuffer.end(), READ_BLOCK_SIZE),
       [this, info](const boost::system::error_code& ec,
@@ -322,6 +327,9 @@ void SocketTask2::asyncReadSome() {
                                                   << " failed with " << ec;
           closeStream();
         } else {
+          JobGuard guard(_loop);
+          guard.enterLoop();
+
           _readBuffer.increaseLength(transferred);
 
           while (processRead()) {

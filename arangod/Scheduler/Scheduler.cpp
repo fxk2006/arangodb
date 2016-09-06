@@ -41,19 +41,35 @@
 #include "Scheduler/Task.h"
 #include "Scheduler/Task2.h"
 
+using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-boost::asio::io_service* IOSERVICE;
-EventLoop2* EVENTLOOP2;
+namespace {
+class SchedulerThread2 : public Thread {
+ public:
+  SchedulerThread2(Scheduler* scheduler, boost::asio::io_service* service)
+    : Thread("Scheduler"), _scheduler(scheduler), _service(service) {}
 
-static void runThread(boost::asio::io_service* service) {
-  boost::shared_ptr<boost::asio::io_service::work> work(
-      new boost::asio::io_service::work(*service));
+ public:
+  void run() {
+    _scheduler->incRunning();
+    LOG(ERR) << "running (" << _scheduler->infoStatus() << ")";
 
-  LOG(ERR) << "running";
-  service->run();
-  LOG(ERR) << "stopped";
+    try {
+      _service->run();
+    } catch (...) {
+      LOG(ERR) << "FAILED";
+    }
+
+    auto n = _scheduler->decRunning();
+    LOG(ERR) << "stopped (" << _scheduler->infoStatus() << ")";
+  }
+
+ private:
+  Scheduler* _scheduler;
+  boost::asio::io_service* _service;
+};
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -65,7 +81,10 @@ Scheduler::Scheduler(size_t nrThreads)
       threads(0),
       stopping(0),
       nextLoop(0),
-      _active(true) {
+      _nrBusy(0),
+      _nrWorking(0),
+      _nrBlocked(0),
+      _nrRunning(0) {
   // check for multi-threading scheduler
   multiThreading = (nrThreads > 1);
 
@@ -90,6 +109,8 @@ Scheduler::~Scheduler() {}
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief starts scheduler, keeps running
 ////////////////////////////////////////////////////////////////////////////////
+
+EventLoop2* EVENTLOOP2;
 
 bool Scheduler::start(ConditionVariable* cv) {
   MUTEX_LOCKER(mutexLocker, schedulerLock);
@@ -134,15 +155,24 @@ bool Scheduler::start(ConditionVariable* cv) {
     }
   }
 
-  IOSERVICE = _ioService = new boost::asio::io_service();
-  EVENTLOOP2 = new EventLoop2{._ioService = *IOSERVICE, ._scheduler = this};
+  _ioService = new boost::asio::io_service();
+  EVENTLOOP2 = new EventLoop2{._ioService = *_ioService, ._scheduler = this};
 
-  for (size_t i = 0; i < nrThreads; ++i) {
-    new std::thread(std::bind(runThread, IOSERVICE));
+  _workGuard.reset(new boost::asio::io_service::work(*_ioService));
+
+  _nrMaximal = nrThreads;
+
+  for (size_t i = 0; i < 2; ++i) {
+    startNewThread();
   }
 
   LOG(TRACE) << "all scheduler threads are up and running";
   return true;
+}
+
+void Scheduler::startNewThread() {
+  auto thread = new SchedulerThread2(this, _ioService);
+  thread->start();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -537,7 +567,7 @@ int Scheduler::registerTask(Task* task, ssize_t* got, ssize_t want) {
 
 void Scheduler::signalTask2(std::unique_ptr<TaskData> data) {
   TaskData* td = data.release();
-  IOSERVICE->dispatch([td]() {
+  _ioService->dispatch([td]() {
     std::unique_ptr<TaskData> data(td);
     data->_task->signalTask(std::move(data));
   });

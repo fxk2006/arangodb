@@ -262,6 +262,7 @@ add_executable(${BIN_ARANGOD}
   RestServer/VocbaseContext.cpp
   RestServer/WorkMonitorFeature.cpp
   RestServer/arangod.cpp
+  Scheduler/JobGuard.cpp
   Scheduler/ListenTask.cpp
   Scheduler/PeriodicTask.cpp
   Scheduler/Scheduler.cpp

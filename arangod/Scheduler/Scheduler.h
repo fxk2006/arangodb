@@ -28,6 +28,7 @@
 #include "Basics/Common.h"
 
 #include "Basics/socket-utils.h"
+#include "Logger/Logger.h"
 #include "Scheduler/TaskManager.h"
 
 #include "Basics/Mutex.h"
@@ -72,31 +73,8 @@ class Scheduler : private TaskManager {
   virtual ~Scheduler();
 
  public:
-  boost::asio::io_service* ioService() const {
-    return _ioService;
-  }
+  boost::asio::io_service* ioService() const { return _ioService; }
 
-  bool tryDirectThread() {
-    if (_directUse + _blocked < nrThreads) {
-      ++_directUse;
-      return true;
-    }
-    
-    return false;
-  }
-
-  void undirectThread() {
-    --_directUse;
-  }
-
-  void blockThread() {
-    ++_blocked;
-  }
-
-  void unblockThread() {
-    --_blocked;
-  }
-  
   //////////////////////////////////////////////////////////////////////////////
   /// @brief starts scheduler, keeps running
   ///
@@ -390,7 +368,7 @@ class Scheduler : private TaskManager {
   /// @brief scheduler activity flag
   //////////////////////////////////////////////////////////////////////////////
 
-  bool _active;
+  bool _active = true;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief cores to use for affinity
@@ -406,9 +384,68 @@ class Scheduler : private TaskManager {
 
   boost::asio::io_service* _ioService;
 
-  std::atomic<size_t> _blocked;
-  std::atomic<size_t> _directUse;
+ public:
+  bool isIdle() {
+    if (_nrWorking < _nrRunning) {
+      return true;
+    }
 
+    if (_nrWorking < _nrRunning + _nrBlocked) {
+      startNewThread();
+      return true;
+    }
+
+    return false;
+  }
+
+  void enterThread() {
+    int64_t n = ++_nrBusy;
+
+    if (n >= _nrRunning && _nrRunning <= _nrMaximal + _nrBlocked) {
+      LOG(ERR) << "STARTING NEW THREAD BUSY " << n;
+      startNewThread();
+    }
+  }
+
+  void unenterThread() { --_nrBusy; }
+
+  void workThread() { ++_nrWorking; }
+
+  void unworkThread() { --_nrWorking; }
+
+  void blockThread() {
+    int64_t n = ++_nrBlocked;
+
+    if (_nrRunning <= _nrMaximal + _nrBlocked) {
+      LOG(ERR) << "BLOCKED " << n;
+      startNewThread();
+    }
+  }
+
+  void unblockThread() { --_nrBlocked; }
+
+  uint64_t incRunning() { return ++_nrRunning; }
+
+  uint64_t decRunning() { return --_nrRunning; }
+
+  std::string infoStatus() {
+    return "busy: " + std::to_string(_nrBusy)
+      + ", working: " + std::to_string(_nrWorking)
+      + ", blocked: " + std::to_string(_nrBlocked)
+      + ", running: " + std::to_string(_nrRunning)
+      + ", maximal: " + std::to_string(_nrMaximal);
+  }
+
+ private:
+  void startNewThread();
+
+  std::atomic<int64_t> _nrBusy;
+  std::atomic<int64_t> _nrWorking;
+  std::atomic<int64_t> _nrBlocked;
+  std::atomic<int64_t> _nrRunning;
+  std::atomic<int64_t> _nrMaximal;
+
+  boost::shared_ptr<boost::asio::io_service::work> _workGuard;
 };
 }
 }
