@@ -33,7 +33,6 @@ class RestDocumentHandler : public RestVocbaseBaseHandler {
   RestDocumentHandler(GeneralRequest*, GeneralResponse*);
 
  public:
-  bool isDirect() const override final { return true; }
   status execute() override final;
 
  protected:

@@ -53,17 +53,45 @@ class SchedulerThread2 : public Thread {
 
  public:
   void run() {
+    static size_t EVERY_LOOP = 1000;
+    static double MIN_SECONDS = 5;
+
     _scheduler->incRunning();
-    LOG(ERR) << "running (" << _scheduler->infoStatus() << ")";
+    LOG_TOPIC(DEBUG, Logger::THREADS) << "running (" << _scheduler->infoStatus() << ")";
+
+    size_t counter = 0;
+    auto start = std::chrono::steady_clock::now();
 
     try {
-      _service->run();
-    } catch (...) {
-      LOG(ERR) << "FAILED";
-    }
+      while (! _scheduler->isStopping()) {
+	_service->run_one();
 
-    auto n = _scheduler->decRunning();
-    LOG(ERR) << "stopped (" << _scheduler->infoStatus() << ")";
+	if (++counter > EVERY_LOOP) {
+	  auto now = std::chrono::steady_clock::now();
+	  std::chrono::duration<double> diff = now - start;
+	  
+	  if (diff.count() > MIN_SECONDS) {
+	    if (_scheduler->stopThread()) {
+	      auto n = _scheduler->decRunning();
+
+	      if (n <= 2) {
+		_scheduler->incRunning();
+	      } else {
+		break;
+	      }
+	    }
+
+	    start = std::chrono::steady_clock::now();
+	  }
+	}
+      }
+
+      LOG_TOPIC(DEBUG, Logger::THREADS) << "stopped (" << _scheduler->infoStatus() << ")";
+    } catch (...) {
+      LOG_TOPIC(ERR, Logger::THREADS) << "scheduler loop caught an error, restarting";
+      _scheduler->decRunning();
+      _scheduler->startNewThread();
+    }
   }
 
  private:
@@ -79,32 +107,21 @@ class SchedulerThread2 : public Thread {
 Scheduler::Scheduler(size_t nrThreads)
     : nrThreads(nrThreads),
       threads(0),
-      stopping(0),
+      _stopping(false),
       nextLoop(0),
+      _randomizer(0),
       _nrBusy(0),
       _nrWorking(0),
       _nrBlocked(0),
       _nrRunning(0) {
-  // check for multi-threading scheduler
-  multiThreading = (nrThreads > 1);
-
-  if (!multiThreading) {
-    nrThreads = 1;
-  }
-
-  // report status
-  if (multiThreading) {
-    LOG(TRACE) << "scheduler is multi-threaded, number of threads: "
-               << nrThreads;
-  } else {
-    LOG(TRACE) << "scheduler is single-threaded";
-  }
 
   // setup signal handlers
   initializeSignalHandlers();
 }
 
-Scheduler::~Scheduler() {}
+Scheduler::~Scheduler() {
+  _ioService->stop();
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief starts scheduler, keeps running
@@ -166,13 +183,57 @@ bool Scheduler::start(ConditionVariable* cv) {
     startNewThread();
   }
 
+  std::chrono::milliseconds interval(500);
+  _threadManager.reset(new boost::asio::steady_timer(*_ioService));
+
+  _threadHandler
+    = [this, interval](const boost::system::error_code& error) {
+    if (!error) {
+      rebalanceThreads();
+    }
+
+    if (! isStopping()) {
+      _threadManager->expires_from_now(interval);
+      _threadManager->async_wait(_threadHandler);
+    }
+  };
+  
+  _threadManager->expires_from_now(interval);
+  _threadManager->async_wait(_threadHandler);
+
   LOG(TRACE) << "all scheduler threads are up and running";
   return true;
 }
 
 void Scheduler::startNewThread() {
+  MUTEX_LOCKER(guard, _threadsLock);
+  
   auto thread = new SchedulerThread2(this, _ioService);
+
+  _threads.emplace(thread);
   thread->start();
+}
+
+bool Scheduler::stopThread() {
+  if (_nrRunning >= 3) {
+    int64_t low = (_nrRunning <= 4) ? 0 : (_nrRunning * 1 / 4);
+	
+    if (_nrBusy <= low && _nrWorking <= low) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void Scheduler::rebalanceThreads() {
+  int64_t high = (_nrRunning <= 4) ? 1 : (_nrRunning * 3 / 4);
+
+  if (_nrBusy >= high || _nrWorking >= high) {
+    if (_nrRunning < _nrMaximal + _nrBlocked) {
+      startNewThread();
+    }
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -202,7 +263,7 @@ bool Scheduler::isRunning() {
 ////////////////////////////////////////////////////////////////////////////////
 
 void Scheduler::beginShutdown() {
-  if (stopping != 0) {
+  if (_stopping) {
     return;
   }
 
@@ -215,14 +276,13 @@ void Scheduler::beginShutdown() {
   }
 
   // set the flag AFTER stopping the threads
-  stopping = 1;
+  _stopping = true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief checks if scheduler is shuting down
 ////////////////////////////////////////////////////////////////////////////////
 
-bool Scheduler::isShutdownInProgress() { return stopping != 0; }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief shuts down the scheduler
@@ -286,9 +346,10 @@ std::shared_ptr<VPackBuilder> Scheduler::getUserTask(std::string const& id) {
 ////////////////////////////////////////////////////////////////////////////////
 
 int Scheduler::unregisterUserTask(std::string const& id) {
-  if (stopping) {
+  if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
+  
   if (id.empty()) {
     return TRI_ERROR_TASK_INVALID_ID;
   }
@@ -326,9 +387,10 @@ int Scheduler::unregisterUserTask(std::string const& id) {
 ////////////////////////////////////////////////////////////////////////////////
 
 int Scheduler::unregisterUserTasks() {
-  if (stopping) {
+  if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
+  
   while (true) {
     Task* task = nullptr;
 
@@ -375,7 +437,7 @@ int Scheduler::registerTask(Task* task, ssize_t* tn) {
 ////////////////////////////////////////////////////////////////////////////////
 
 int Scheduler::unregisterTask(Task* task) {
-  if (stopping) {
+  if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
 
@@ -414,7 +476,7 @@ int Scheduler::unregisterTask(Task* task) {
 ////////////////////////////////////////////////////////////////////////////////
 
 int Scheduler::destroyTask(Task* task) {
-  if (stopping) {
+  if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
 
@@ -501,9 +563,10 @@ EventLoop Scheduler::lookupLoopById(uint64_t taskId) {
 ////////////////////////////////////////////////////////////////////////////////
 
 int Scheduler::registerTask(Task* task, ssize_t* got, ssize_t want) {
-  if (stopping) {
+  if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
+  
   TRI_ASSERT(task != nullptr);
 
   if (task->isUserDefined() && task->id().empty()) {
@@ -538,7 +601,7 @@ int Scheduler::registerTask(Task* task, ssize_t* got, ssize_t want) {
     }
 
     if (0 > want) {
-      if (multiThreading && !task->needsMainEventLoop()) {
+      if (!task->needsMainEventLoop()) {
         n = (++nextLoop) % nrThreads;
       }
     }

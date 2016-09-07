@@ -27,11 +27,13 @@
 
 #include "Basics/Common.h"
 
+#include <boost/asio/steady_timer.hpp>
+
+#include "Basics/Mutex.h"
+#include "Basics/MutexLocker.h"
 #include "Basics/socket-utils.h"
 #include "Logger/Logger.h"
 #include "Scheduler/TaskManager.h"
-
-#include "Basics/Mutex.h"
 
 namespace arangodb {
 namespace basics {
@@ -59,7 +61,7 @@ class Scheduler : private TaskManager {
   ///
   /// If the number of threads is one, then the scheduler is single-threaded.
   /// In this case the only methods, which can be called from a different thread
-  /// are beginShutdown, isShutdownInProgress, and isRunning. The method
+  /// are beginShutdown, isStopping, and isRunning. The method
   /// registerTask must be called before the Scheduler is started or from
   /// within the Scheduler thread.
   ///
@@ -107,7 +109,7 @@ class Scheduler : private TaskManager {
   /// @brief checks if scheduler is shuting down
   //////////////////////////////////////////////////////////////////////////////
 
-  bool isShutdownInProgress();
+  bool isStopping() { return _stopping; }
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief shuts down the scheduler
@@ -332,13 +334,7 @@ class Scheduler : private TaskManager {
   /// @brief true if scheduler is shutting down
   //////////////////////////////////////////////////////////////////////////////
 
-  volatile sig_atomic_t stopping;  // TODO(fc) XXX make this atomic
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief true if scheduler is multi-threaded
-  //////////////////////////////////////////////////////////////////////////////
-
-  bool multiThreading;
+  std::atomic<bool> _stopping;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief round-robin for event loops
@@ -390,21 +386,11 @@ class Scheduler : private TaskManager {
       return true;
     }
 
-    if (_nrWorking < _nrRunning + _nrBlocked) {
-      startNewThread();
-      return true;
-    }
-
     return false;
   }
 
   void enterThread() {
-    int64_t n = ++_nrBusy;
-
-    if (n >= _nrRunning && _nrRunning <= _nrMaximal + _nrBlocked) {
-      LOG(ERR) << "STARTING NEW THREAD BUSY " << n;
-      startNewThread();
-    }
+    ++_nrBusy;
   }
 
   void unenterThread() { --_nrBusy; }
@@ -414,12 +400,7 @@ class Scheduler : private TaskManager {
   void unworkThread() { --_nrWorking; }
 
   void blockThread() {
-    int64_t n = ++_nrBlocked;
-
-    if (_nrRunning <= _nrMaximal + _nrBlocked) {
-      LOG(ERR) << "BLOCKED " << n;
-      startNewThread();
-    }
+    ++_nrBlocked;
   }
 
   void unblockThread() { --_nrBlocked; }
@@ -436,8 +417,13 @@ class Scheduler : private TaskManager {
       + ", maximal: " + std::to_string(_nrMaximal);
   }
 
- private:
   void startNewThread();
+  bool stopThread();
+
+ private:
+  void rebalanceThreads();
+
+  std::atomic<int64_t> _randomizer;
 
   std::atomic<int64_t> _nrBusy;
   std::atomic<int64_t> _nrWorking;
@@ -446,6 +432,12 @@ class Scheduler : private TaskManager {
   std::atomic<int64_t> _nrMaximal;
 
   boost::shared_ptr<boost::asio::io_service::work> _workGuard;
+
+  std::unique_ptr<boost::asio::steady_timer> _threadManager;
+  std::function<void(const boost::system::error_code&)> _threadHandler;
+
+  Mutex _threadsLock;
+  std::unordered_set<Thread*> _threads;
 };
 }
 }

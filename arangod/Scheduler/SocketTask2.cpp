@@ -50,13 +50,10 @@ SocketTask2::SocketTask2(EventLoop2 loop, TRI_socket_t socket,
   _stream.non_blocking(true);
 
   if (ec) {
-    LOG_TOPIC(ERR, Logger::COMMUNICATION) << "cannot create stream from socket"
+    LOG_TOPIC(ERR, Logger::COMMUNICATION) << "cannot create stream from socket: "
                                           << ec;
     _closedSend = true;
     _closedReceive = true;
-  } else {
-    LOG_TOPIC(ERR, Logger::COMMUNICATION) << "connection on "
-                                          << _stream.native_handle();
   }
 }
 
@@ -192,7 +189,7 @@ void SocketTask2::closeStream() {
     try {
       _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
     } catch (boost::system::system_error err) {
-      LOG(WARN) << "shutdown send stream " << _stream.native_handle()
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "shutdown send stream " << _stream.native_handle()
                 << " failed with " << err.what();
     }
 
@@ -203,7 +200,7 @@ void SocketTask2::closeStream() {
     try {
       _stream.shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
     } catch (boost::system::system_error err) {
-      LOG(WARN) << "shutdown send stream " << _stream.native_handle()
+      LOG_TOPIC(DEBUG, Logger::COMMUNICATION) << "shutdown send stream " << _stream.native_handle()
                 << " failed with " << err.what();
     }
 
@@ -213,7 +210,7 @@ void SocketTask2::closeStream() {
   try {
     _stream.close();
   } catch (boost::system::system_error err) {
-    LOG(WARN) << "close stream " << _stream.native_handle() << " failed with "
+    LOG_TOPIC(WARN, Logger::COMMUNICATION) << "close stream " << _stream.native_handle() << " failed with "
               << err.what();
   }
 
