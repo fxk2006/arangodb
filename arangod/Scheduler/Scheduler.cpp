@@ -58,6 +58,7 @@ class SchedulerManagerThread : public Thread {
     while (!_scheduler->isStopping()) {
       try {
         _service->run_one();
+	_scheduler->deleteOldThreads();
       } catch (...) {
         LOG_TOPIC(ERR, Logger::THREADS)
             << "manager loop caught an error, restarting";
@@ -75,7 +76,7 @@ class SchedulerManagerThread : public Thread {
 class SchedulerThread2 : public Thread {
  public:
   SchedulerThread2(Scheduler* scheduler, boost::asio::io_service* service)
-      : Thread("Scheduler"), _scheduler(scheduler), _service(service) {}
+      : Thread("Scheduler2"), _scheduler(scheduler), _service(service) {}
 
   ~SchedulerThread2() { shutdown(); }
 
@@ -288,7 +289,32 @@ void Scheduler::threadDone(Thread* thread) {
   MUTEX_LOCKER(guard, _threadsLock);
 
   _threads.erase(thread);
-  delete thread;
+  _deadThreads.insert(thread);
+}
+
+
+void Scheduler::deleteOldThreads() {
+  // delete old thread objects
+  std::unordered_set<Thread*> deadThreads;
+
+  {
+    MUTEX_LOCKER(guard, _threadsLock);
+
+    if (_deadThreads.empty()) {
+      return;
+    }
+    
+    deadThreads.swap(_deadThreads);
+  }
+
+  for (auto thread : deadThreads) {
+    try {
+      delete thread;
+    } catch (...) {
+      LOG_TOPIC(ERR, Logger::THREADS)
+	<< "cannot delete thread";
+    }
+  }
 }
 
 void Scheduler::rebalanceThreads() {

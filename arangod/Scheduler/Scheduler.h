@@ -430,6 +430,7 @@ class Scheduler : private TaskManager {
   void startNewThread();
   bool stopThread();
   void threadDone(Thread*);
+  void deleteOldThreads();
 
  private:
   void startIoService();
@@ -460,6 +461,7 @@ class Scheduler : private TaskManager {
 
   Mutex _threadsLock;
   std::unordered_set<Thread*> _threads;
+  std::unordered_set<Thread*> _deadThreads;
 };
 }
 }
