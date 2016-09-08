@@ -185,11 +185,12 @@ bool GeneralCommTask::handleRequest(WorkItem::uptr<RestHandler> handler) {
   }
 
   // ok, we need to queue the request
-  auto self = this;
+  LOG_TOPIC(DEBUG, Logger::THREADS) << "too much work, queuing handler";
 
-  return _server->queue(std::move(handler), [self](WorkItem::uptr<RestHandler> h) {
-    self->handleRequestDirectly(std::move(h));
-  });
+  return _server->queue(std::move(handler),
+                        [this](WorkItem::uptr<RestHandler> h) {
+                          handleRequestDirectly(std::move(h));
+                        });
 }
 
 void GeneralCommTask::handleRequestDirectly(WorkItem::uptr<RestHandler> h) {
@@ -231,7 +232,7 @@ void GeneralCommTask::handleRequestDirectly(WorkItem::uptr<RestHandler> h) {
 }
 
 bool GeneralCommTask::handleRequestAsync(WorkItem::uptr<RestHandler> handler,
-                                       uint64_t* jobId) {
+                                         uint64_t* jobId) {
 #if 0
   bool startThread = startThread();
 
@@ -275,4 +276,3 @@ bool GeneralCommTask::handleRequestAsync(WorkItem::uptr<RestHandler> handler,
   return res == TRI_ERROR_NO_ERROR;
 #endif
 }
-

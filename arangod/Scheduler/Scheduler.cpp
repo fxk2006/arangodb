@@ -46,10 +46,38 @@ using namespace arangodb::basics;
 using namespace arangodb::rest;
 
 namespace {
+class SchedulerManagerThread : public Thread {
+ public:
+  SchedulerManagerThread(Scheduler* scheduler, boost::asio::io_service* service)
+      : Thread("SchedulerManager"), _scheduler(scheduler), _service(service) {}
+
+  ~SchedulerManagerThread() { shutdown(); }
+
+ public:
+  void run() {
+    while (!_scheduler->isStopping()) {
+      try {
+        _service->run_one();
+      } catch (...) {
+        LOG_TOPIC(ERR, Logger::THREADS)
+            << "manager loop caught an error, restarting";
+      }
+    }
+
+    _scheduler->threadDone(this);
+  }
+
+ private:
+  Scheduler* _scheduler;
+  boost::asio::io_service* _service;
+};
+
 class SchedulerThread2 : public Thread {
  public:
   SchedulerThread2(Scheduler* scheduler, boost::asio::io_service* service)
-    : Thread("Scheduler"), _scheduler(scheduler), _service(service) {}
+      : Thread("Scheduler"), _scheduler(scheduler), _service(service) {}
+
+  ~SchedulerThread2() { shutdown(); }
 
  public:
   void run() {
@@ -57,41 +85,46 @@ class SchedulerThread2 : public Thread {
     static double MIN_SECONDS = 5;
 
     _scheduler->incRunning();
-    LOG_TOPIC(DEBUG, Logger::THREADS) << "running (" << _scheduler->infoStatus() << ")";
+    LOG_TOPIC(DEBUG, Logger::THREADS) << "running (" << _scheduler->infoStatus()
+                                      << ")";
 
     size_t counter = 0;
     auto start = std::chrono::steady_clock::now();
 
     try {
-      while (! _scheduler->isStopping()) {
-	_service->run_one();
+      while (!_scheduler->isStopping()) {
+        _service->run_one();
 
-	if (++counter > EVERY_LOOP) {
-	  auto now = std::chrono::steady_clock::now();
-	  std::chrono::duration<double> diff = now - start;
-	  
-	  if (diff.count() > MIN_SECONDS) {
-	    if (_scheduler->stopThread()) {
-	      auto n = _scheduler->decRunning();
+        if (++counter > EVERY_LOOP) {
+          auto now = std::chrono::steady_clock::now();
+          std::chrono::duration<double> diff = now - start;
 
-	      if (n <= 2) {
-		_scheduler->incRunning();
-	      } else {
-		break;
-	      }
-	    }
+          if (diff.count() > MIN_SECONDS) {
+            if (_scheduler->stopThread()) {
+              auto n = _scheduler->decRunning();
 
-	    start = std::chrono::steady_clock::now();
-	  }
-	}
+              if (n <= 2) {
+                _scheduler->incRunning();
+              } else {
+                break;
+              }
+            }
+
+            start = std::chrono::steady_clock::now();
+          }
+        }
       }
 
-      LOG_TOPIC(DEBUG, Logger::THREADS) << "stopped (" << _scheduler->infoStatus() << ")";
+      LOG_TOPIC(DEBUG, Logger::THREADS) << "stopped ("
+                                        << _scheduler->infoStatus() << ")";
     } catch (...) {
-      LOG_TOPIC(ERR, Logger::THREADS) << "scheduler loop caught an error, restarting";
+      LOG_TOPIC(ERR, Logger::THREADS)
+          << "scheduler loop caught an error, restarting";
       _scheduler->decRunning();
       _scheduler->startNewThread();
     }
+
+    _scheduler->threadDone(this);
   }
 
  private:
@@ -100,9 +133,9 @@ class SchedulerThread2 : public Thread {
 };
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief scheduler singleton
-////////////////////////////////////////////////////////////////////////////////
+// -----------------------------------------------------------------------------
+// --SECTION--                                      constructors and destructors
+// -----------------------------------------------------------------------------
 
 Scheduler::Scheduler(size_t nrThreads)
     : nrThreads(nrThreads),
@@ -113,13 +146,15 @@ Scheduler::Scheduler(size_t nrThreads)
       _nrBusy(0),
       _nrWorking(0),
       _nrBlocked(0),
-      _nrRunning(0) {
-
+      _nrRunning(0),
+      _nrRealMaximum(0),
+      _lastThreadWarning(0) {
   // setup signal handlers
   initializeSignalHandlers();
 }
 
 Scheduler::~Scheduler() {
+  _managerService->stop();
   _ioService->stop();
 }
 
@@ -172,43 +207,66 @@ bool Scheduler::start(ConditionVariable* cv) {
     }
   }
 
-  _ioService = new boost::asio::io_service();
-  EVENTLOOP2 = new EventLoop2{._ioService = *_ioService, ._scheduler = this};
-
-  _workGuard.reset(new boost::asio::io_service::work(*_ioService));
+  startIoService();
 
   _nrMaximal = nrThreads;
+  _nrRealMaximum = 4 * _nrMaximal;
 
   for (size_t i = 0; i < 2; ++i) {
     startNewThread();
   }
 
-  std::chrono::milliseconds interval(500);
-  _threadManager.reset(new boost::asio::steady_timer(*_ioService));
-
-  _threadHandler
-    = [this, interval](const boost::system::error_code& error) {
-    if (!error) {
-      rebalanceThreads();
-    }
-
-    if (! isStopping()) {
-      _threadManager->expires_from_now(interval);
-      _threadManager->async_wait(_threadHandler);
-    }
-  };
-  
-  _threadManager->expires_from_now(interval);
-  _threadManager->async_wait(_threadHandler);
+  startManagerThread();
+  startRebalancer();
 
   LOG(TRACE) << "all scheduler threads are up and running";
   return true;
 }
 
+void Scheduler::startIoService() {
+  _ioService.reset(new boost::asio::io_service());
+  _serviceGuard.reset(new boost::asio::io_service::work(*_ioService));
+
+  EVENTLOOP2 = new EventLoop2{._ioService = *_ioService, ._scheduler = this};
+
+  _managerService.reset(new boost::asio::io_service());
+  _managerGuard.reset(new boost::asio::io_service::work(*_managerService));
+}
+
+void Scheduler::startRebalancer() {
+  std::chrono::milliseconds interval(500);
+  _threadManager.reset(new boost::asio::steady_timer(*_managerService));
+
+  _threadHandler = [this, interval](const boost::system::error_code& error) {
+    if (!error) {
+      rebalanceThreads();
+    }
+
+    if (!isStopping()) {
+      _threadManager->expires_from_now(interval);
+      _threadManager->async_wait(_threadHandler);
+    }
+  };
+
+  _threadManager->expires_from_now(interval);
+  _threadManager->async_wait(_threadHandler);
+
+  _lastThreadWarning.store(TRI_microtime());
+}
+
+void Scheduler::startManagerThread() {
+  MUTEX_LOCKER(guard, _threadsLock);
+
+  auto thread = new SchedulerManagerThread(this, _managerService.get());
+
+  _threads.emplace(thread);
+  thread->start();
+}
+
 void Scheduler::startNewThread() {
   MUTEX_LOCKER(guard, _threadsLock);
-  
-  auto thread = new SchedulerThread2(this, _ioService);
+
+  auto thread = new SchedulerThread2(this, _ioService.get());
 
   _threads.emplace(thread);
   thread->start();
@@ -217,7 +275,7 @@ void Scheduler::startNewThread() {
 bool Scheduler::stopThread() {
   if (_nrRunning >= 3) {
     int64_t low = (_nrRunning <= 4) ? 0 : (_nrRunning * 1 / 4);
-	
+
     if (_nrBusy <= low && _nrWorking <= low) {
       return true;
     }
@@ -226,11 +284,54 @@ bool Scheduler::stopThread() {
   return false;
 }
 
-void Scheduler::rebalanceThreads() {
-  int64_t high = (_nrRunning <= 4) ? 1 : (_nrRunning * 3 / 4);
+void Scheduler::threadDone(Thread* thread) {
+  MUTEX_LOCKER(guard, _threadsLock);
 
-  if (_nrBusy >= high || _nrWorking >= high) {
+  _threads.erase(thread);
+  delete thread;
+}
+
+void Scheduler::rebalanceThreads() {
+  static double const MIN_WARN_INTERVAL = 10;
+  static double const MIN_ERR_INTERVAL = 300;
+
+  int64_t high = (_nrRunning <= 4) ? 1 : (_nrRunning * 3 / 4);
+  int64_t working = (_nrBusy > _nrWorking) ? _nrBusy : _nrWorking;
+
+  LOG_TOPIC(DEBUG, Logger::THREADS) << "rebalancing threads, high: " << high
+                                    << ", working: " << working << " ("
+                                    << infoStatus() << ")";
+
+  if (working >= high) {
     if (_nrRunning < _nrMaximal + _nrBlocked) {
+      startNewThread();
+      return;
+    }
+  }
+
+  if (working >= _nrMaximal + _nrBlocked) {
+    double ltw = _lastThreadWarning.load();
+    double now = TRI_microtime();
+
+    if (_nrRunning >= _nrRealMaximum) {
+      if (ltw - now > MIN_ERR_INTERVAL) {
+        LOG_TOPIC(ERR, Logger::THREADS) << "too many threads (" << infoStatus()
+                                        << ")";
+        _lastThreadWarning.store(now);
+      }
+    } else {
+      if (_nrRunning >= _nrRealMaximum * 3 / 4) {
+        if (ltw - now > MIN_WARN_INTERVAL) {
+          LOG_TOPIC(WARN, Logger::THREADS)
+              << "number of threads is reaching a critical limit ("
+              << infoStatus() << ")";
+          _lastThreadWarning.store(now);
+        }
+      }
+
+      LOG_TOPIC(DEBUG, Logger::THREADS) << "overloading threads ("
+                                        << infoStatus() << ")";
+
       startNewThread();
     }
   }
@@ -282,7 +383,6 @@ void Scheduler::beginShutdown() {
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief checks if scheduler is shuting down
 ////////////////////////////////////////////////////////////////////////////////
-
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief shuts down the scheduler
@@ -349,7 +449,7 @@ int Scheduler::unregisterUserTask(std::string const& id) {
   if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
-  
+
   if (id.empty()) {
     return TRI_ERROR_TASK_INVALID_ID;
   }
@@ -390,7 +490,7 @@ int Scheduler::unregisterUserTasks() {
   if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
-  
+
   while (true) {
     Task* task = nullptr;
 
@@ -566,7 +666,7 @@ int Scheduler::registerTask(Task* task, ssize_t* got, ssize_t want) {
   if (_stopping) {
     return TRI_ERROR_SHUTTING_DOWN;
   }
-  
+
   TRI_ASSERT(task != nullptr);
 
   if (task->isUserDefined() && task->id().empty()) {

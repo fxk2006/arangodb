@@ -26,15 +26,9 @@
 
 #include "Basics/ConditionLocker.h"
 #include "Basics/MutexLocker.h"
-#include "Basics/WorkMonitor.h"
-#include "Dispatcher/Dispatcher.h"
-#include "Dispatcher/DispatcherFeature.h"
 #include "Endpoint/EndpointList.h"
 #include "GeneralServer/AsyncJobManager.h"
-#include "GeneralServer/GeneralCommTask.h"
 #include "GeneralServer/GeneralListenTask.h"
-#include "GeneralServer/GeneralServerFeature.h"
-#include "GeneralServer/GeneralServerJob.h"
 #include "GeneralServer/RestHandler.h"
 #include "Logger/Logger.h"
 #include "Rest/CommonDefines.h"
@@ -70,23 +64,28 @@ class GeneralServerThread : public Thread {
 
       for (size_t i = 0; i < GeneralServer::SYSTEM_QUEUE_SIZE; ++i) {
         GeneralServer::Job* job = nullptr;
-        size_t active = _server->active();
 
-        while (_server->tryActive() && _server->pop(i, job)) {
-          LOG_TOPIC(TRACE, Logger::COMMUNICATION)
-              << "queuing next job, currently active " << active;
+        LOG_TOPIC(TRACE, Logger::THREADS) << "size of queue #" << i << ": "
+                                          << _server->queueSize(i);
 
-          _server->incActive();
+        while (_server->tryActive()) {
+          if (!_server->pop(i, job)) {
+            _server->releaseActive();
+            break;
+          }
+
+          LOG_TOPIC(TRACE, Logger::THREADS)
+              << "starting next queued job, number currently active "
+              << _server->active();
+
           idleTries = 0;
 
           _ioService->dispatch([server, job]() {
             job->_callback(std::move(job->_handler));
-            server->decActive();
+            server->releaseActive();
             server->wakeup();
             delete job;
           });
-
-          active = _server->active();
         }
       }
 
@@ -96,6 +95,7 @@ class GeneralServerThread : public Thread {
       // miss a signal.
 
       if (idleTries >= 2) {
+        LOG_TOPIC(TRACE, Logger::THREADS) << "queue manager going to sleep";
         _server->waitForWork();
       }
     }
@@ -128,19 +128,24 @@ int GeneralServer::sendChunk(uint64_t taskId, std::string const& data) {
 // --SECTION--                                      constructors and destructors
 // -----------------------------------------------------------------------------
 
-GeneralServer::GeneralServer(boost::asio::io_service* ioService)
-  : _queueStandard(1024),
-    _queueAql(1024),
-    _queues{&_queueStandard, &_queueAql},
-    _active(0), _ioService(ioService) {
+GeneralServer::GeneralServer(size_t queueSize,
+                             boost::asio::io_service* ioService)
+    : _queueStandard(queueSize),
+      _queueAql(queueSize),
+      _queues{&_queueAql, &_queueStandard},
+      _active(0),
+      _ioService(ioService) {
+  for (size_t i = 0; i < SYSTEM_QUEUE_SIZE; ++i) {
+    _queuesSize[i].store(0);
+  }
+
   _queueWatcher = new GeneralServerThread(this, _ioService);
 }
 
 GeneralServer::~GeneralServer() { stopListening(); }
 
 // -----------------------------------------------------------------------------
-// --SECTION--                                                    public
-// methods
+// --SECTION--                                                    public methods
 // -----------------------------------------------------------------------------
 
 void GeneralServer::setEndpointList(EndpointList const* list) {
@@ -186,6 +191,7 @@ bool GeneralServer::queue(
 
   try {
     _queues[queue]->push(job);
+    ++_queuesSize[queue];
   } catch (...) {
     wakeup();
     delete job;
@@ -196,27 +202,30 @@ bool GeneralServer::queue(
   return true;
 }
 
+bool GeneralServer::tryActive() {
+  if (!SchedulerFeature::SCHEDULER->tryBlocking()) {
+    return false;
+  }
+
+  ++_active;
+  return true;
+}
+
+void GeneralServer::releaseActive() {
+  SchedulerFeature::SCHEDULER->unworkThread();
+  --_active;
+}
+
 void GeneralServer::wakeup() {
   CONDITION_LOCKER(guard, _queueCondition);
-
   guard.signal();
 }
 
 void GeneralServer::waitForWork() {
-  static uint64_t n = 0;
+  static uint64_t WAIT_TIME = 1000 * 1000;
 
   CONDITION_LOCKER(guard, _queueCondition);
-
-  for (size_t i = 0; i < SYSTEM_QUEUE_SIZE; ++i) {
-    if (!_queues[i]->empty()) {
-      return;
-    }
-  }
-
-  // wait at most 1000ms
-  uint64_t waitTime = (1 + (((++n) >> 3) % 9)) * 100 * 1000;
-
-  guard.wait(waitTime);
+  guard.wait(WAIT_TIME);
 }
 
 // -----------------------------------------------------------------------------

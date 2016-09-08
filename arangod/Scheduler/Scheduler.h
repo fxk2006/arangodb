@@ -75,7 +75,7 @@ class Scheduler : private TaskManager {
   virtual ~Scheduler();
 
  public:
-  boost::asio::io_service* ioService() const { return _ioService; }
+  boost::asio::io_service* ioService() const { return _ioService.get(); }
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief starts scheduler, keeps running
@@ -378,11 +378,20 @@ class Scheduler : private TaskManager {
 
   size_t _affinityPos = 0;
 
-  boost::asio::io_service* _ioService;
-
  public:
   bool isIdle() {
-    if (_nrWorking < _nrRunning) {
+    if (_nrWorking < _nrRunning && _nrWorking < _nrMaximal) {
+      return true;
+    }
+
+    return false;
+  }
+
+  bool tryBlocking() {
+    static int64_t const MIN_FREE = 2;
+
+    if (_nrWorking < (_nrRealMaximum - MIN_FREE)) {
+      ++_nrWorking;
       return true;
     }
 
@@ -414,15 +423,21 @@ class Scheduler : private TaskManager {
       + ", working: " + std::to_string(_nrWorking)
       + ", blocked: " + std::to_string(_nrBlocked)
       + ", running: " + std::to_string(_nrRunning)
-      + ", maximal: " + std::to_string(_nrMaximal);
+      + ", maximal: " + std::to_string(_nrMaximal)
+      + ", real maximum: " + std::to_string(_nrRealMaximum);
   }
 
   void startNewThread();
   bool stopThread();
+  void threadDone(Thread*);
 
  private:
+  void startIoService();
+  void startRebalancer();
+  void startManagerThread();
   void rebalanceThreads();
 
+ private:
   std::atomic<int64_t> _randomizer;
 
   std::atomic<int64_t> _nrBusy;
@@ -430,8 +445,15 @@ class Scheduler : private TaskManager {
   std::atomic<int64_t> _nrBlocked;
   std::atomic<int64_t> _nrRunning;
   std::atomic<int64_t> _nrMaximal;
+  std::atomic<int64_t> _nrRealMaximum;
 
-  boost::shared_ptr<boost::asio::io_service::work> _workGuard;
+  std::atomic<double> _lastThreadWarning;
+
+  boost::shared_ptr<boost::asio::io_service::work> _serviceGuard;
+  std::unique_ptr<boost::asio::io_service> _ioService;
+
+  boost::shared_ptr<boost::asio::io_service::work> _managerGuard;
+  std::unique_ptr<boost::asio::io_service> _managerService;
 
   std::unique_ptr<boost::asio::steady_timer> _threadManager;
   std::function<void(const boost::system::error_code&)> _threadHandler;

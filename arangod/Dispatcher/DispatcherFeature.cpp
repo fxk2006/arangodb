@@ -69,14 +69,17 @@ void DispatcherFeature::collectOptions(
   options->addOption("--server.threads",
                      "number of threads for basic operations (0 = automatic)",
                      new UInt64Parameter(&_nrStandardThreads));
-  
+
   options->addHiddenOption("--server.extra-threads",
-                           "number of extra threads that can additionally be created when all regular threads are blocked and the client requests thread creation",
+                           "number of extra threads that can additionally be "
+                           "created when all regular threads are blocked and "
+                           "the client requests thread creation",
                            new Int64Parameter(&_nrExtraThreads));
 
-  options->addHiddenOption("--server.aql-threads",
-                           "number of threads for basic operations (0 = automatic)",
-                           new UInt64Parameter(&_nrAqlThreads));
+  options->addHiddenOption(
+      "--server.aql-threads",
+      "number of threads for basic operations (0 = automatic)",
+      new UInt64Parameter(&_nrAqlThreads));
 
   options->addHiddenOption("--server.maximal-queue-size",
                            "maximum queue length for asynchronous operations",
@@ -89,17 +92,17 @@ void DispatcherFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
     size_t n = TRI_numberProcessors();
 
     // start at least 4 dispatcher threads. this is necessary as
-    // threads may be blocking, and starting just one is not enough 
+    // threads may be blocking, and starting just one is not enough
     n = (std::max)(n, static_cast<size_t>(4));
     _nrStandardThreads = n;
   }
-    
+
   TRI_ASSERT(_nrStandardThreads >= 1);
 
   if (_nrAqlThreads == 0) {
     _nrAqlThreads = _nrStandardThreads;
   }
-  
+
   TRI_ASSERT(_nrAqlThreads >= 1);
 
   if (_nrExtraThreads < 0) {
@@ -114,10 +117,11 @@ void DispatcherFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
 }
 
 void DispatcherFeature::prepare() {
-  V8DealerFeature* dealer = 
+  V8DealerFeature* dealer =
       ApplicationServer::getFeature<V8DealerFeature>("V8Dealer");
 
-  dealer->defineDouble("DISPATCHER_THREADS", static_cast<double>(_nrStandardThreads));
+  dealer->defineDouble("DISPATCHER_THREADS",
+                       static_cast<double>(_nrStandardThreads));
 }
 
 void DispatcherFeature::start() {
@@ -134,9 +138,7 @@ void DispatcherFeature::start() {
       nullptr);
 }
 
-void DispatcherFeature::beginShutdown() {
-  _dispatcher->beginShutdown();
-}
+void DispatcherFeature::beginShutdown() { _dispatcher->beginShutdown(); }
 
 void DispatcherFeature::stop() {
   // signal the shutdown to the scheduler thread, so it does not
@@ -161,9 +163,7 @@ void DispatcherFeature::stop() {
   _dispatcher->shutdown();
 }
 
-void DispatcherFeature::unprepare() {
-  DISPATCHER = nullptr;
-}
+void DispatcherFeature::unprepare() { DISPATCHER = nullptr; }
 
 void DispatcherFeature::buildDispatcher() {
   _dispatcher = new Dispatcher(SchedulerFeature::SCHEDULER);
@@ -172,13 +172,12 @@ void DispatcherFeature::buildDispatcher() {
 }
 
 void DispatcherFeature::buildStandardQueue() {
-  LOG_TOPIC(DEBUG, Logger::STARTUP) << "setting up a standard queue with "
-                                    << _nrStandardThreads << " threads"
-                                    << " and " << _nrExtraThreads
-                                    << " extra threads";
+  LOG_TOPIC(DEBUG, Logger::STARTUP)
+      << "setting up a standard queue with " << _nrStandardThreads << " threads"
+      << " and " << _nrExtraThreads << " extra threads";
 
-  _dispatcher->addStandardQueue(static_cast<size_t>(_nrStandardThreads), 
-                                static_cast<size_t>(_nrExtraThreads), 
+  _dispatcher->addStandardQueue(static_cast<size_t>(_nrStandardThreads),
+                                static_cast<size_t>(_nrExtraThreads),
                                 static_cast<size_t>(_queueSize));
 }
 
@@ -186,8 +185,8 @@ void DispatcherFeature::buildAqlQueue() {
   LOG_TOPIC(DEBUG, Logger::STARTUP) << "setting up the AQL standard queue with "
                                     << _nrAqlThreads << " threads";
 
-  _dispatcher->addAQLQueue(static_cast<size_t>(_nrAqlThreads), 
-                           static_cast<size_t>(_nrExtraThreads), 
+  _dispatcher->addAQLQueue(static_cast<size_t>(_nrAqlThreads),
+                           static_cast<size_t>(_nrExtraThreads),
                            static_cast<size_t>(_queueSize));
 }
 

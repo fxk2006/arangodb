@@ -51,6 +51,9 @@ class DispatcherFeature final
   void stop() override final;
   void unprepare() override final;
 
+ public:
+  uint64_t queueSize() const { return _queueSize; }
+
  private:
   uint64_t _nrStandardThreads;
   int64_t _nrExtraThreads;

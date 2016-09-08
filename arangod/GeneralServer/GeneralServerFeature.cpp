@@ -219,7 +219,9 @@ void GeneralServerFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
 }
 
 static TRI_vocbase_t* LookupDatabaseFromRequest(GeneralRequest* request) {
-  auto databaseFeature = application_features::ApplicationServer::getFeature<DatabaseFeature>("Database");
+  auto databaseFeature =
+      application_features::ApplicationServer::getFeature<DatabaseFeature>(
+          "Database");
 
   // get database name from request
   std::string const& dbName = request->databaseName();
@@ -229,11 +231,12 @@ static TRI_vocbase_t* LookupDatabaseFromRequest(GeneralRequest* request) {
     // as a fallback
     request->setDatabaseName(StaticStrings::SystemDatabase);
     if (ServerState::instance()->isCoordinator()) {
-      return databaseFeature->useDatabaseCoordinator(StaticStrings::SystemDatabase);
+      return databaseFeature->useDatabaseCoordinator(
+          StaticStrings::SystemDatabase);
     }
     return databaseFeature->useDatabase(StaticStrings::SystemDatabase);
   }
-  
+
   if (ServerState::instance()->isCoordinator()) {
     return databaseFeature->useDatabaseCoordinator(dbName);
   }
@@ -355,7 +358,11 @@ void GeneralServerFeature::buildServers() {
     }
   }
 
-  GeneralServer* server = new GeneralServer(SchedulerFeature::SCHEDULER->ioService());
+  DispatcherFeature* dispatcher =
+      application_features::ApplicationServer::getFeature<DispatcherFeature>(
+          "Dispatcher");
+  GeneralServer* server = new GeneralServer(
+      dispatcher->queueSize(), SchedulerFeature::SCHEDULER->ioService());
 
   server->setEndpointList(&endpointList);
   _servers.push_back(server);

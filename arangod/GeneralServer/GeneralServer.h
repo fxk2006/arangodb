@@ -67,15 +67,16 @@ class GeneralServer : protected TaskManager {
   };
 
  public:
-  static size_t const STANDARD_QUEUE = 0;
-  static size_t const AQL_QUEUE = 1;
+  // ordered by priority (highst prio first)
+  static size_t const AQL_QUEUE = 0;
+  static size_t const STANDARD_QUEUE = 1;
   static size_t const SYSTEM_QUEUE_SIZE = 2;
 
  public:
   static int sendChunk(uint64_t, std::string const&);
 
  public:
-  explicit GeneralServer(boost::asio::io_service* ioService);
+  GeneralServer(size_t queueSize, boost::asio::io_service* ioService);
   virtual ~GeneralServer();
 
  public:
@@ -85,14 +86,25 @@ class GeneralServer : protected TaskManager {
 
   bool queue(WorkItem::uptr<RestHandler>,
              std::function<void(WorkItem::uptr<RestHandler>)>);
-  bool pop(size_t i, Job*& job) { return _queues[i]->pop(job); }
+
+  int64_t queueSize(size_t i) { return _queuesSize[i]; }
+
+  bool pop(size_t i, Job*& job) {
+    bool ok = _queues[i]->pop(job);
+
+    if (ok && job != nullptr) {
+      --(_queuesSize[i]);
+    }
+
+    return ok;
+  }
+
   void wakeup();
   void waitForWork();
 
   size_t active() const { return _active.load(); }
-  void incActive() { ++_active; }
-  void decActive() { --_active; }
-  bool tryActive() { return _active.load() < 10; }
+  bool tryActive();
+  void releaseActive();
 
  protected:
   bool openEndpoint(Endpoint* endpoint);
@@ -104,6 +116,7 @@ class GeneralServer : protected TaskManager {
   boost::lockfree::queue<Job*> _queueStandard;
   boost::lockfree::queue<Job*> _queueAql;
   boost::lockfree::queue<Job*>* _queues[SYSTEM_QUEUE_SIZE];
+  std::atomic<int64_t> _queuesSize[SYSTEM_QUEUE_SIZE];
   std::atomic<size_t> _active;
 
  private:
